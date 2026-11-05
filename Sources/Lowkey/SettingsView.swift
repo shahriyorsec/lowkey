@@ -47,6 +47,11 @@ struct SettingsView: View {
                     Text("Only the lyrics are shown, directly over your windows.")
                         .foregroundStyle(.secondary)
                 }
+                if settings.p.backgroundStyle != .transparent {
+                    Picker("Border", selection: $settings.p.edgeStyle) {
+                        ForEach(EdgeStyle.allCases) { Text($0.label).tag($0) }
+                    }
+                }
                 labeled("Corner radius", value: "\(Int(settings.p.cornerRadius))") {
                     Slider(value: $settings.p.cornerRadius, in: 0...40)
                 }
@@ -71,6 +76,7 @@ struct SettingsView: View {
                 labeled("Content size", value: "\(Int((settings.p.scale * 100).rounded()))%") {
                     Slider(value: $settings.p.scale, in: 0.7...3)
                 }
+                Toggle("Resize by dragging the card's edges", isOn: $settings.p.resizeFromEdges)
                 Button("Move and resize on screen…", action: onEdit)
                 Button("Automatic card size") {
                     settings.p.cardWidth = 0

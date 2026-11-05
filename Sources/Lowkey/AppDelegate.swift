@@ -2,6 +2,46 @@ import AppKit
 import Combine
 import SwiftUI
 
+/// Which sides of the card a resize drag moves.
+struct ResizeEdges: OptionSet {
+    let rawValue: Int
+    static let left = ResizeEdges(rawValue: 1)
+    static let right = ResizeEdges(rawValue: 2)
+    static let top = ResizeEdges(rawValue: 4)
+    static let bottom = ResizeEdges(rawValue: 8)
+
+    /// The zone under a point in window coordinates. Corners get a bigger target than edges.
+    static func zone(at point: NSPoint, in size: NSSize) -> ResizeEdges {
+        guard point.x >= 0, point.y >= 0, point.x <= size.width, point.y <= size.height else { return [] }
+        let edge = 7.0, corner = 16.0
+        let nearX: ResizeEdges = point.x < corner ? .left : point.x > size.width - corner ? .right : []
+        let nearY: ResizeEdges = point.y < corner ? .bottom : point.y > size.height - corner ? .top : []
+        if !nearX.isEmpty && !nearY.isEmpty { return nearX.union(nearY) }
+        var result: ResizeEdges = []
+        if point.x < edge { result.insert(.left) }
+        if point.x > size.width - edge { result.insert(.right) }
+        if point.y < edge { result.insert(.bottom) }
+        if point.y > size.height - edge { result.insert(.top) }
+        return result
+    }
+
+    var cursor: NSCursor? {
+        let position: NSCursor.FrameResizePosition
+        switch self {
+        case [.left]: position = .left
+        case [.right]: position = .right
+        case [.top]: position = .top
+        case [.bottom]: position = .bottom
+        case [.top, .left]: position = .topLeft
+        case [.top, .right]: position = .topRight
+        case [.bottom, .left]: position = .bottomLeft
+        case [.bottom, .right]: position = .bottomRight
+        default: return nil
+        }
+        return NSCursor.frameResize(position: position, directions: .all)
+    }
+}
+
 final class OverlayPanel: NSPanel {
     init() {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -26,14 +66,26 @@ final class OverlayPanel: NSPanel {
 
     var isEditing = false
     var onMoved: (() -> Void)?
+    var resizeEnabled = false
+    var onResizeBegan: ((ResizeEdges) -> Void)?
+    var onResizing: ((NSPoint) -> Void)?
+    var onResizeEnded: (() -> Void)?
     private var dragTimer: Timer?
 
     /// Dragging lives here, not in SwiftUI, so it works however the card is laid out and
     /// doesn't need the app to be active. Edit mode keeps its two controls clickable.
     override func sendEvent(_ event: NSEvent) {
-        if event.type == .leftMouseDown, startsDrag(event) {
-            trackDrag()
-            return
+        if event.type == .leftMouseDown {
+            let onDoneButton = isEditing && event.locationInWindow.x > frame.width - 96 && event.locationInWindow.y > frame.height - 48
+            let zone = resizeEnabled && !onDoneButton ? ResizeEdges.zone(at: event.locationInWindow, in: frame.size) : []
+            if !zone.isEmpty {
+                trackResize(zone)
+                return
+            }
+            if startsDrag(event) {
+                trackDrag()
+                return
+            }
         }
         super.sendEvent(event)
     }
@@ -42,10 +94,23 @@ final class OverlayPanel: NSPanel {
         if event.modifierFlags.contains(.option) { return true }
         guard isEditing else { return false }
         let point = event.locationInWindow
-        let size = frame.size
-        let onResizeHandle = point.x > size.width - 44 && point.y < 44
-        let onDoneButton = point.x > size.width - 96 && point.y > size.height - 48
-        return !onResizeHandle && !onDoneButton
+        return !(point.x > frame.width - 96 && point.y > frame.height - 48)
+    }
+
+    private func trackResize(_ edges: ResizeEdges) {
+        dragTimer?.invalidate()
+        onResizeBegan?(edges)
+        let timer = Timer(timeInterval: 1.0 / 120, repeats: true) { [weak self] timer in
+            guard let self else { return timer.invalidate() }
+            self.onResizing?(NSEvent.mouseLocation)
+            if NSEvent.pressedMouseButtons & 1 == 0 {
+                timer.invalidate()
+                self.dragTimer = nil
+                self.onResizeEnded?()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        dragTimer = timer
     }
 
     /// Reads the pointer directly: a non-activating panel isn't sent every drag event,
@@ -96,7 +161,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var isVisible = false
 
     private var pointerTimer: Timer?
-    private var resizeStart: (mouse: NSPoint, size: NSSize)?
+    private var resizeStart: (edges: ResizeEdges, mouse: NSPoint, frame: NSRect, scale: Double)?
+    private var shownCursorZone: ResizeEdges = []
     private var fullScreenSize: CGSize?
     private let fullScreenItem = NSMenuItem(title: "", action: #selector(toggleFullScreen), keyEquivalent: "")
 
@@ -113,7 +179,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rebuildContent()
         panel.onMoved = { [weak self] in self?.saveCustomOrigin() }
         panel.onEscape = { [weak self] in self?.setFullScreen(false) }
-        pointerTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.updateMouseHandling() }
+        panel.onResizeBegan = { [weak self] in self?.beginResize($0) }
+        panel.onResizing = { [weak self] in self?.handleResize($0) }
+        panel.onResizeEnded = { [weak self] in self?.resizeStart = nil }
+        pointerTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in self?.updateMouseHandling() }
         updateFrame()
 
         settings.$p.receive(on: RunLoop.main).sink { [weak self] _ in self?.updateFrame() }.store(in: &bag)
@@ -132,7 +201,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func rebuildContent() {
         let root = OverlayView(
             settings: settings, model: model, isEditing: editingBinding, fullScreenSize: fullScreenSize,
-            onResize: { [weak self] in self?.handleResize($0) },
             onDone: { [weak self] in self?.setEditing(false) },
             onExitFullScreen: { [weak self] in self?.setFullScreen(false) })
         let host = ClickableHostingView(rootView: root)
@@ -271,7 +339,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if model.isHovering != hovering { model.isHovering = hovering }
         let inWindow = NSPoint(x: mouse.x - panel.frame.minX, y: mouse.y - panel.frame.minY)
         let onControls = hovering && ((controlsRect()?.contains(inWindow) ?? false) || (seekRect()?.contains(inWindow) ?? false))
-        let catchesMouse = fullScreenSize != nil || isEditing || onControls || NSEvent.modifierFlags.contains(.option)
+        let resizeAllowed = fullScreenSize == nil && (settings.p.resizeFromEdges || isEditing)
+        let zone = hovering && resizeAllowed ? ResizeEdges.zone(at: inWindow, in: panel.frame.size) : []
+        panel.resizeEnabled = resizeAllowed
+        if resizeStart == nil && zone != shownCursorZone {
+            shownCursorZone = zone
+            (zone.cursor ?? .arrow).set()
+        }
+        let catchesMouse = fullScreenSize != nil || isEditing || onControls || !zone.isEmpty || NSEvent.modifierFlags.contains(.option)
         if panel.ignoresMouseEvents == catchesMouse { panel.ignoresMouseEvents = !catchesMouse }
     }
 
@@ -281,22 +356,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settings.p.anchor = .custom
     }
 
-    private func handleResize(_ mouse: NSPoint?) {
-        guard let mouse else {
-            resizeStart = nil
-            return
-        }
-        if resizeStart == nil {
-            // The top-left corner stays put while the bottom-right corner follows the mouse.
-            saveCustomOrigin()
-            resizeStart = (mouse, panel.frame.size)
-        }
+    private func beginResize(_ edges: ResizeEdges) {
+        resizeStart = (edges, NSEvent.mouseLocation, panel.frame, settings.p.scale)
+    }
+
+    /// Moves the dragged sides, keeps the opposite ones still, and grows the content along with the card.
+    private func handleResize(_ mouse: NSPoint) {
         guard let start = resizeStart else { return }
-        // The card itself grows, up to the whole screen; the text keeps its size.
+        let dx = mouse.x - start.mouse.x, dy = mouse.y - start.mouse.y
         let area = (panel.screen ?? NSScreen.screens.first)?.visibleFrame.size ?? NSSize(width: 4000, height: 4000)
-        let s = settings.p.scale
-        settings.p.cardWidth = min(area.width, max(CardGeometry.minWidth * s, start.size.width + mouse.x - start.mouse.x))
-        settings.p.cardHeight = min(area.height, max(CardGeometry.minHeight * s, start.size.height + start.mouse.y - mouse.y))
+        var width = start.frame.width + (start.edges.contains(.right) ? dx : start.edges.contains(.left) ? -dx : 0)
+        var height = start.frame.height + (start.edges.contains(.bottom) ? -dy : start.edges.contains(.top) ? dy : 0)
+
+        let growth = ((width / start.frame.width) * (height / start.frame.height)).squareRoot()
+        let scale = min(3, max(0.7, start.scale * max(0.01, growth)))
+        width = min(area.width, max(CardGeometry.minWidth * scale, width))
+        height = min(area.height, max(CardGeometry.minHeight * scale, height))
+
+        var p = settings.p
+        p.scale = scale
+        p.cardWidth = width
+        p.cardHeight = height
+        p.anchor = .custom
+        p.customX = start.edges.contains(.left) ? start.frame.maxX - width : start.frame.minX
+        p.customY = start.edges.contains(.top) ? start.frame.minY + height : start.frame.maxY
+        settings.p = p
     }
 
     // MARK: Menu bar

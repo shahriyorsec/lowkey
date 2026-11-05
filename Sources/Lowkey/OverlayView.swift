@@ -120,7 +120,6 @@ struct OverlayView: View {
     @ObservedObject var model: NowPlaying
     @Binding var isEditing: Bool
     var fullScreenSize: CGSize? = nil
-    var onResize: (NSPoint?) -> Void
     var onDone: () -> Void
     var onExitFullScreen: () -> Void = {}
 
@@ -218,11 +217,11 @@ struct OverlayView: View {
                 }
                 .animation(.easeInOut(duration: 0.9), value: model.meshColors)
                 .clipShape(shape)
-                BlocksShape(blocks: g.blocks, inset: 0.5).stroke(Color.white.opacity(0.16), lineWidth: 1)
+                edge(g)
             case .blurOnly:
                 BackdropBlur(radius: p.blurRadius, geometry: g, plain: true).allowsHitTesting(false)
                 Color.black.opacity(p.glassDarkness).clipShape(shape)
-                BlocksShape(blocks: g.blocks, inset: 0.5).stroke(Color.white.opacity(0.2), lineWidth: 1)
+                edge(g)
             case .transparent:
                 Color.clear
             }
@@ -257,6 +256,32 @@ struct OverlayView: View {
                              mainIconSize: 3.8 * unit, buttonHeight: 7 * unit)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Light Edge catches light along each surface's top, as real glass does, and fades before the bottom.
+    @ViewBuilder
+    private func edge(_ g: CardGeometry) -> some View {
+        if !g.isFullScreen {
+            switch p.edgeStyle {
+            case .lightEdge:
+                ForEach(Array(g.blocks.enumerated()), id: \.offset) { _, block in
+                    BlocksShape(blocks: [block], inset: 0.5).stroke(
+                        LinearGradient(stops: [
+                            .init(color: .white.opacity(0.42), location: 0),
+                            .init(color: .white.opacity(0.1), location: 0.45),
+                            .init(color: .white.opacity(0.03), location: 0.75),
+                            .init(color: .white.opacity(0.1), location: 1),
+                        ],
+                        startPoint: UnitPoint(x: 0.5, y: block.rect.minY / max(1, g.size.height)),
+                        endPoint: UnitPoint(x: 0.5, y: block.rect.maxY / max(1, g.size.height))),
+                        lineWidth: 1)
+                }
+            case .hairline:
+                BlocksShape(blocks: g.blocks, inset: 0.5).stroke(Color.white.opacity(0.16), lineWidth: 1)
+            case .borderless:
+                EmptyView()
+            }
+        }
     }
 
     private func artwork(side: Double, radius: Double) -> some View {
@@ -344,11 +369,8 @@ struct OverlayView: View {
                 .frame(width: 26, height: 26)
                 .background(Circle().fill(.white))
                 .padding(6)
-                .contentShape(Rectangle())
-                .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .global)
-                    .onChanged { _ in onResize(NSEvent.mouseLocation) }
-                    .onEnded { _ in onResize(nil) })
-                .accessibilityLabel("Resize")
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
         }
     }
 }

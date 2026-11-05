@@ -29,6 +29,18 @@ enum CardLayout: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+enum EdgeStyle: String, Codable, CaseIterable, Identifiable {
+    case lightEdge, borderless, hairline
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .lightEdge: return "Light Edge"
+        case .borderless: return "None"
+        case .hairline: return "Hairline"
+        }
+    }
+}
+
 enum BackgroundStyle: String, Codable, CaseIterable, Identifiable {
     case albumColor, blurOnly, transparent
     var id: String { rawValue }
@@ -45,6 +57,8 @@ enum BackgroundStyle: String, Codable, CaseIterable, Identifiable {
 struct Prefs: Codable, Equatable {
     var layout = CardLayout.twoBlocks
     var backgroundStyle = BackgroundStyle.albumColor
+    var edgeStyle = EdgeStyle.lightEdge
+    var resizeFromEdges = true
     var glassDarkness = 0.14
     var showControls = true
     var clickToSeek = true
