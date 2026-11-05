@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var settings: Settings
     var onEdit: () -> Void
+    var onFullScreen: () -> Void
 
     private var customColor: Binding<Color> {
         Binding(get: { settings.customColor }, set: { settings.customColor = $0 })
@@ -56,6 +57,7 @@ struct SettingsView: View {
                     Slider(value: $settings.p.fontSize, in: 14...40, step: 1)
                 }
                 Stepper("Visible lines: \(settings.p.visibleLines)", value: $settings.p.visibleLines, in: 1...6)
+                    .disabled(settings.p.cardHeight > 0)
                 Toggle("Show song title and art", isOn: $settings.p.showHeader)
                 Toggle("Animations", isOn: $settings.p.animationsEnabled)
                 labeled("Sync offset", value: String(format: "%+.1f s", settings.p.syncOffset)) {
@@ -66,10 +68,16 @@ struct SettingsView: View {
                 Picker("Position", selection: $settings.p.anchor) {
                     ForEach(Anchor.allCases) { Text($0.label).tag($0) }
                 }
-                labeled("Size", value: "\(Int((settings.p.scale * 100).rounded()))%") {
-                    Slider(value: $settings.p.scale, in: 0.7...1.8)
+                labeled("Content size", value: "\(Int((settings.p.scale * 100).rounded()))%") {
+                    Slider(value: $settings.p.scale, in: 0.7...3)
                 }
-                Button("Drag on screen…", action: onEdit)
+                Button("Move and resize on screen…", action: onEdit)
+                Button("Automatic card size") {
+                    settings.p.cardWidth = 0
+                    settings.p.cardHeight = 0
+                }
+                .disabled(settings.p.cardWidth == 0 && settings.p.cardHeight == 0)
+                Button("Full Screen Lyrics", action: onFullScreen)
             }
             Section("Behavior") {
                 Toggle("Show playback controls", isOn: $settings.p.showControls)

@@ -67,6 +67,8 @@ struct Prefs: Codable, Equatable {
     var customX = 0.0   // top-left corner, global screen coordinates
     var customY = 0.0
     var scale = 1.0
+    var cardWidth = 0.0    // 0 means automatic
+    var cardHeight = 0.0
 
     var hideWhenPaused = true
     var hideWhenNoLyrics = false

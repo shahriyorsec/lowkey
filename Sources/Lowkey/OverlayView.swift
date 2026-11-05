@@ -17,37 +17,70 @@ struct CardGeometry: Equatable {
     var controlsRect: CGRect?
     /// Controls fade in on hover when the layout has no permanent place for them.
     var controlsOnHover = false
+    var isFullScreen = false
+    /// Text size and lyric area stay independent of the card's size, so resizing shows more
+    /// lines instead of zooming.
+    var lyricFont: Double
+    var viewportHeight: Double
 
     static let width = 440.0
+    static let minWidth = 300.0
+    static let minHeight = 130.0
     static func lyricsHeight(_ p: Prefs) -> Double { Double(p.visibleLines) * (p.fontSize * 1.82) }
 
-    init(_ p: Prefs) {
-        let s = p.scale, w = Self.width * s, gap = 10 * s, radius = p.cornerRadius * s
-        let lyricsBlockHeight = 34 * s + Self.lyricsHeight(p) * s
+    init(_ p: Prefs, fullScreen: CGSize? = nil) {
+        let s = p.scale, gap = 10 * s, radius = p.cornerRadius * s
+        lyricFont = p.fontSize * s
+        viewportHeight = 0
 
-        func hoverControls(_ size: CGSize) -> CGRect? {
-            p.showControls ? CGRect(x: size.width - 124 * s, y: 0, width: 124 * s, height: 72 * s) : nil
+        if let screen = fullScreen {
+            isFullScreen = true
+            size = screen
+            let area = CGRect(origin: .zero, size: screen)
+            blocks = [GlassBlock(rect: area, radius: 0)]
+            coverRect = CGRect(x: 0, y: 0, width: screen.width * 0.4, height: screen.height)
+            lyricsRect = CGRect(x: screen.width * 0.42, y: screen.height * 0.1,
+                                width: screen.width * 0.53, height: screen.height * 0.8)
+            lyricFont = min(screen.height * 0.058, screen.width * 0.04)
+            viewportHeight = lyricsRect.height
+            return
+        }
+
+        let w = max(Self.minWidth * s, p.cardWidth > 0 ? p.cardWidth : Self.width * s)
+        let autoLyrics = Self.lyricsHeight(p) * s
+
+        func hoverControls(_ width: Double) -> CGRect? {
+            p.showControls ? CGRect(x: width - 124 * s, y: 0, width: 124 * s, height: 72 * s) : nil
+        }
+        /// The explicit height if the user dragged one, or else room for the chosen line count.
+        func total(_ auto: Double) -> Double {
+            p.cardHeight > 0 ? max(Self.minHeight * s, p.cardHeight) : auto
         }
 
         if p.layout == .classic {
-            let header = p.showHeader ? 58.0 : 0
-            let height = (40 + header + Self.lyricsHeight(p)) * s
+            let chrome = (40 + (p.showHeader ? 58.0 : 0)) * s
+            let height = total(chrome + autoLyrics)
             size = CGSize(width: w, height: height)
             lyricsRect = CGRect(origin: .zero, size: size)
+            viewportHeight = max(0, height - chrome)
             blocks = [GlassBlock(rect: lyricsRect, radius: radius)]
-            controlsRect = hoverControls(size)
+            controlsRect = hoverControls(w)
             controlsOnHover = true
         } else if !p.showHeader {
-            size = CGSize(width: w, height: lyricsBlockHeight)
+            let height = total(34 * s + autoLyrics)
+            size = CGSize(width: w, height: height)
             lyricsRect = CGRect(origin: .zero, size: size)
+            viewportHeight = max(0, height - 34 * s)
             blocks = [GlassBlock(rect: lyricsRect, radius: radius)]
-            controlsRect = hoverControls(size)
+            controlsRect = hoverControls(w)
             controlsOnHover = true
         } else {
             let round = p.layout == .roundButtons && p.showControls
             let topHeight = (p.layout == .roundButtons ? 66 : 80) * s
-            size = CGSize(width: w, height: topHeight + gap + lyricsBlockHeight)
-            lyricsRect = CGRect(x: 0, y: topHeight + gap, width: w, height: lyricsBlockHeight)
+            let height = max(topHeight + gap + 60 * s, total(topHeight + gap + 34 * s + autoLyrics))
+            size = CGSize(width: w, height: height)
+            lyricsRect = CGRect(x: 0, y: topHeight + gap, width: w, height: height - topHeight - gap)
+            viewportHeight = max(0, lyricsRect.height - 34 * s)
             var coverWidth = w
             if round {
                 let spacing = 8 * s
@@ -86,8 +119,10 @@ struct OverlayView: View {
     @ObservedObject var settings: Settings
     @ObservedObject var model: NowPlaying
     @Binding var isEditing: Bool
+    var fullScreenSize: CGSize? = nil
     var onResize: (NSPoint?) -> Void
     var onDone: () -> Void
+    var onExitFullScreen: () -> Void = {}
 
     private var p: Prefs { settings.p }
     private var s: Double { p.scale }
@@ -98,7 +133,7 @@ struct OverlayView: View {
     }
 
     var body: some View {
-        let geometry = CardGeometry(p)
+        let geometry = CardGeometry(p, fullScreen: fullScreenSize)
         ZStack(alignment: .topLeading) {
             background(geometry)
             content(geometry)
@@ -114,10 +149,25 @@ struct OverlayView: View {
     @ViewBuilder
     private func content(_ g: CardGeometry) -> some View {
         ZStack(alignment: .topLeading) {
-            if p.layout == .classic {
+            if g.isFullScreen {
+                fullScreenCover(g).place(g.coverRect ?? .zero)
+                LyricsViewport(settings: settings, model: model, font: g.lyricFont, height: g.viewportHeight)
+                    .place(g.lyricsRect)
+                Button(action: onExitFullScreen) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 36, height: 36)
+                        .background(Circle().fill(.black.opacity(0.3)))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Exit full screen")
+                .padding(24)
+            } else if p.layout == .classic {
                 VStack(alignment: .leading, spacing: 14 * s) {
                     if p.showHeader { classicHeader }
-                    LyricsViewport(settings: settings, model: model)
+                    LyricsViewport(settings: settings, model: model, font: g.lyricFont, height: g.viewportHeight)
                 }
                 .padding(EdgeInsets(top: 20 * s, leading: 24 * s, bottom: 20 * s, trailing: 24 * s))
             } else {
@@ -125,7 +175,7 @@ struct OverlayView: View {
                 ForEach(Array(g.circles.enumerated()), id: \.offset) { index, rect in
                     circleButton(index, diameter: rect.width).place(rect)
                 }
-                LyricsViewport(settings: settings, model: model)
+                LyricsViewport(settings: settings, model: model, font: g.lyricFont, height: g.viewportHeight)
                     .padding(EdgeInsets(top: 16 * s, leading: 24 * s, bottom: 18 * s, trailing: 24 * s))
                     .place(g.lyricsRect)
             }
@@ -177,6 +227,36 @@ struct OverlayView: View {
                 Color.clear
             }
         }
+    }
+
+    private func fullScreenCover(_ g: CardGeometry) -> some View {
+        let unit = g.size.height / 100
+        let art = min(g.size.width * 0.28, g.size.height * 0.5)
+        return VStack(alignment: .center, spacing: 3 * unit) {
+            Group {
+                if let image = model.artwork {
+                    Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+                } else {
+                    LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
+                }
+            }
+            .frame(width: art, height: art)
+            .clipShape(RoundedRectangle(cornerRadius: art * 0.05, style: .continuous))
+            .shadow(color: .black.opacity(0.35), radius: 3 * unit, y: unit)
+            VStack(spacing: 0.5 * unit) {
+                Text(model.track?.title ?? "Lowkey")
+                    .font(.system(size: 2.8 * unit, weight: .bold))
+                    .foregroundStyle(.white)
+                Text(model.track?.artist ?? "Preview")
+                    .font(.system(size: 2.2 * unit))
+                    .foregroundStyle(.white.opacity(0.8))
+            }
+            .lineLimit(1)
+            .frame(width: art)
+            PlaybackControls(model: model, scale: 1, buttonSize: 7 * unit, iconSize: 2.6 * unit,
+                             mainIconSize: 3.8 * unit, buttonHeight: 7 * unit)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func artwork(side: Double, radius: Double) -> some View {
@@ -292,16 +372,19 @@ private struct HeightKey: PreferenceKey {
 struct LyricsViewport: View {
     @ObservedObject var settings: Settings
     @ObservedObject var model: NowPlaying
+    let font: Double
+    let height: Double
 
     private var p: Prefs { settings.p }
-    private var s: Double { p.scale }
-    private var font: Double { p.fontSize * s }
+    /// Spacing unit: follows the text size, not the size of the card.
+    private var s: Double { font / 22 }
     private var gap: Double { 8 * s }
+    /// As many lines as the lyric area has room for.
+    private var lineCount: Int { max(1, Int((height + gap) / (font * 1.3 + gap))) }
     /// One finished line stays visible above the current one when there's room.
-    private var pastSlots: Int { p.visibleLines >= 3 ? 1 : 0 }
+    private var pastSlots: Int { lineCount >= 3 ? 1 : 0 }
 
     var body: some View {
-        let height = CardGeometry.lyricsHeight(p) * s
         Group {
             let lines = model.displayLines
             if lines.isEmpty {
@@ -346,7 +429,7 @@ struct LyricsViewport: View {
         // Lines outside the viewport stay rendered: they're measured before they scroll in,
         // and fade out fully before they're dropped, so nothing pops.
         let lower = max(0, anchor - 4)
-        let upper = min(lines.count - 1, anchor + p.visibleLines + 4)
+        let upper = min(lines.count - 1, anchor + lineCount + 4)
         let animate = p.animationsEnabled
         return ZStack(alignment: .topLeading) {
             ForEach(lines[lower...upper]) { line in
@@ -402,7 +485,7 @@ struct LyricsViewport: View {
     private func opacity(_ d: Int) -> Double {
         if d == 0 { return 1 }
         if d < 0 { return d == -1 && pastSlots > 0 ? 0.45 : 0 }
-        let future = p.visibleLines - pastSlots - 1
+        let future = lineCount - pastSlots - 1
         if d > future { return 0 }
         return d == future && future > 1 ? 0.6 : 0.92
     }
@@ -531,15 +614,16 @@ struct PlaybackControls: View {
     var buttonSize = 30.0
     var iconSize = 13.0
     var mainIconSize = 17.0
+    var buttonHeight = 36.0
 
     var body: some View {
         HStack(spacing: 1 * scale) {
             PlaybackButton(symbol: "backward.fill", label: "Previous", iconSize: iconSize * scale,
-                           width: buttonSize * scale, height: 36 * scale, action: model.previousTrack)
+                           width: buttonSize * scale, height: buttonHeight * scale, action: model.previousTrack)
             PlaybackButton(symbol: model.isPlaying ? "pause.fill" : "play.fill", label: model.isPlaying ? "Pause" : "Play",
-                           iconSize: mainIconSize * scale, width: buttonSize * scale, height: 36 * scale, action: model.playPause)
+                           iconSize: mainIconSize * scale, width: buttonSize * scale, height: buttonHeight * scale, action: model.playPause)
             PlaybackButton(symbol: "forward.fill", label: "Next", iconSize: iconSize * scale,
-                           width: buttonSize * scale, height: 36 * scale, action: model.nextTrack)
+                           width: buttonSize * scale, height: buttonHeight * scale, action: model.nextTrack)
         }
     }
 }

@@ -17,7 +17,11 @@ final class OverlayPanel: NSPanel {
         animationBehavior = .none
         ignoresMouseEvents = true
     }
-    override var canBecomeKey: Bool { false }
+    /// Only full screen takes the keyboard, so Esc can close it.
+    var acceptsKeyboard = false
+    var onEscape: (() -> Void)?
+    override var canBecomeKey: Bool { acceptsKeyboard }
+    override func cancelOperation(_ sender: Any?) { onEscape?() }
     override var canBecomeMain: Bool { false }
 
     var isEditing = false
@@ -92,7 +96,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var isVisible = false
 
     private var pointerTimer: Timer?
-    private var resizeStart: (mouse: NSPoint, scale: Double, width: Double)?
+    private var resizeStart: (mouse: NSPoint, size: NSSize)?
+    private var fullScreenSize: CGSize?
+    private let fullScreenItem = NSMenuItem(title: "", action: #selector(toggleFullScreen), keyEquivalent: "")
 
     private let statusLine = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     private let previousItem = NSMenuItem(title: "Previous", action: #selector(previousTrack), keyEquivalent: "")
@@ -106,6 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         buildStatusItem()
         rebuildContent()
         panel.onMoved = { [weak self] in self?.saveCustomOrigin() }
+        panel.onEscape = { [weak self] in self?.setFullScreen(false) }
         pointerTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.updateMouseHandling() }
         updateFrame()
 
@@ -124,20 +131,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func rebuildContent() {
         let root = OverlayView(
-            settings: settings, model: model, isEditing: editingBinding,
+            settings: settings, model: model, isEditing: editingBinding, fullScreenSize: fullScreenSize,
             onResize: { [weak self] in self?.handleResize($0) },
-            onDone: { [weak self] in self?.setEditing(false) })
+            onDone: { [weak self] in self?.setEditing(false) },
+            onExitFullScreen: { [weak self] in self?.setFullScreen(false) })
         let host = ClickableHostingView(rootView: root)
         host.sizingOptions = []
         host.wantsLayer = true
         panel.contentView = host
     }
 
+    private func currentGeometry() -> CardGeometry {
+        CardGeometry(settings.p, fullScreen: fullScreenSize)
+    }
+
     private func panelSize() -> NSSize {
-        CardGeometry(settings.p).size
+        currentGeometry().size
     }
 
     private func updateFrame() {
+        if fullScreenSize != nil, let screen = panel.screen ?? NSScreen.screens.first {
+            if panel.frame != screen.frame { panel.setFrame(screen.frame, display: true) }
+            panel.hasShadow = false
+            return
+        }
         let size = panelSize()
         panel.hasShadow = settings.p.backgroundStyle != .transparent
         let frame = NSRect(origin: origin(for: size), size: size).integral
@@ -175,7 +192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let lyricsOK = !p.hideWhenNoLyrics || self.model.lyricsState == .ready || self.model.lyricsState == .loading
             // Pausing from the card's own button mustn't hide the button needed to resume.
             let holdForPointer = self.isVisible && self.model.isHovering && hasTrack
-            self.setVisible(self.isEditing || (!self.userHidden && hasTrack && (playingOK || holdForPointer) && lyricsOK))
+            self.setVisible(self.fullScreenSize != nil || self.isEditing || (!self.userHidden && hasTrack && (playingOK || holdForPointer) && lyricsOK))
         }
     }
 
@@ -208,9 +225,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func toggleEditing() { setEditing(!isEditing) }
 
+    @objc private func toggleFullScreen() { setFullScreen(fullScreenSize == nil) }
+
+    private func setFullScreen(_ on: Bool) {
+        if on && isEditing { setEditing(false) }
+        if on {
+            guard let screen = panel.screen ?? NSScreen.screens.first else { return }
+            fullScreenSize = screen.frame.size
+        } else {
+            fullScreenSize = nil
+        }
+        panel.acceptsKeyboard = on
+        rebuildContent()
+        updateFrame()
+        updateMouseHandling()
+        updateVisibility()
+        if on {
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+        } else {
+            panel.resignKey()
+        }
+    }
+
     /// Hit area of the playback controls, in window coordinates (origin at the bottom left).
     private func controlsRect() -> NSRect? {
-        let geometry = CardGeometry(settings.p)
+        let geometry = currentGeometry()
         guard let rect = geometry.controlsRect else { return nil }
         return NSRect(x: rect.minX, y: geometry.size.height - rect.maxY, width: rect.width, height: rect.height)
     }
@@ -218,7 +258,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// The lyric area, while it has lines that can be clicked.
     private func seekRect() -> NSRect? {
         guard settings.p.clickToSeek, !model.lines.isEmpty else { return nil }
-        let geometry = CardGeometry(settings.p)
+        let geometry = currentGeometry()
         let rect = geometry.lyricsRect
         return NSRect(x: rect.minX, y: geometry.size.height - rect.maxY, width: rect.width, height: rect.height)
     }
@@ -231,7 +271,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if model.isHovering != hovering { model.isHovering = hovering }
         let inWindow = NSPoint(x: mouse.x - panel.frame.minX, y: mouse.y - panel.frame.minY)
         let onControls = hovering && ((controlsRect()?.contains(inWindow) ?? false) || (seekRect()?.contains(inWindow) ?? false))
-        let catchesMouse = isEditing || onControls || NSEvent.modifierFlags.contains(.option)
+        let catchesMouse = fullScreenSize != nil || isEditing || onControls || NSEvent.modifierFlags.contains(.option)
         if panel.ignoresMouseEvents == catchesMouse { panel.ignoresMouseEvents = !catchesMouse }
     }
 
@@ -249,11 +289,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if resizeStart == nil {
             // The top-left corner stays put while the bottom-right corner follows the mouse.
             saveCustomOrigin()
-            resizeStart = (mouse, settings.p.scale, panel.frame.width)
+            resizeStart = (mouse, panel.frame.size)
         }
         guard let start = resizeStart else { return }
-        let width = start.width + mouse.x - start.mouse.x
-        settings.p.scale = min(1.8, max(0.7, start.scale * width / start.width))
+        // The card itself grows, up to the whole screen; the text keeps its size.
+        let area = (panel.screen ?? NSScreen.screens.first)?.visibleFrame.size ?? NSSize(width: 4000, height: 4000)
+        let s = settings.p.scale
+        settings.p.cardWidth = min(area.width, max(CardGeometry.minWidth * s, start.size.width + mouse.x - start.mouse.x))
+        settings.p.cardHeight = min(area.height, max(CardGeometry.minHeight * s, start.size.height + start.mouse.y - mouse.y))
     }
 
     // MARK: Menu bar
@@ -275,7 +318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hint.isEnabled = false
         menu.addItem(hint)
         menu.addItem(.separator())
-        for item in [toggleItem, editItem] {
+        for item in [toggleItem, fullScreenItem, editItem] {
             item.target = self
             menu.addItem(item)
         }
@@ -296,6 +339,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             statusLine.title = "Nothing playing on Spotify"
         }
         playItem.title = model.isPlaying ? "Pause" : "Play"
+        fullScreenItem.title = fullScreenSize == nil ? "Full Screen Lyrics" : "Exit Full Screen"
         toggleItem.title = userHidden ? "Show Overlay" : "Hide Overlay"
         editItem.title = isEditing ? "Finish Editing" : "Edit Position and Size"
     }
@@ -312,7 +356,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func openSettings() {
         if settingsWindow == nil {
             let window = NSWindow(contentViewController: NSHostingController(
-                rootView: SettingsView(settings: settings, onEdit: { [weak self] in self?.setEditing(true) })))
+                rootView: SettingsView(settings: settings,
+                                       onEdit: { [weak self] in self?.setEditing(true) },
+                                       onFullScreen: { [weak self] in self?.setFullScreen(true) })))
             window.title = "Lowkey Settings"
             window.styleMask = [.titled, .closable, .miniaturizable]
             window.isReleasedWhenClosed = false
