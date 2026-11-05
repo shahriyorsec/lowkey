@@ -106,7 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         buildStatusItem()
         rebuildContent()
         panel.onMoved = { [weak self] in self?.saveCustomOrigin() }
-        pointerTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in self?.updateMouseHandling() }
+        pointerTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.updateMouseHandling() }
         updateFrame()
 
         settings.$p.receive(on: RunLoop.main).sink { [weak self] _ in self?.updateFrame() }.store(in: &bag)

@@ -152,7 +152,8 @@ struct OverlayView: View {
         return ZStack {
             switch p.backgroundStyle {
             case .albumColor:
-                if p.blurEnabled {
+                // Fully opaque colors hide the windows behind, so blurring them would be wasted work.
+                if p.blurEnabled && !(p.showColorBlobs && p.colorStrength >= 0.99) {
                     BackdropBlur(radius: p.blurRadius, geometry: g, plain: false).allowsHitTesting(false)
                 }
                 Group {
@@ -425,7 +426,7 @@ struct LineView: View {
 
     var body: some View {
         // Same view tree whether active or not, so a line changing role never re-creates its text.
-        TimelineView(.animation(minimumInterval: 1.0 / 60, paused: distance != 0 || !model.displayPlaying)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: distance != 0 || !model.displayPlaying)) { context in
             let time = distance == 0 ? model.time(at: context.date) : nil
             if line.isInterlude {
                 InterludeDots(progress: time.map { ($0 - line.start) / line.sungDuration } ?? (distance < 0 ? 1 : 0),
@@ -590,7 +591,7 @@ struct LiquidBackground: View {
     let animated: Bool
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animated)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !animated)) { context in
             let t = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 100_000)
             MeshGradient(width: 4, height: 4, points: points(t), colors: blended(t),
                          smoothsColors: true, colorSpace: .perceptual)

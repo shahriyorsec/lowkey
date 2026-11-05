@@ -86,7 +86,7 @@ final class NowPlaying: ObservableObject {
             name: NSNotification.Name("com.spotify.client.PlaybackStateChanged"), object: nil)
         timers = [
             Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.poll() },
-            Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { [weak self] _ in self?.updateIndex() },
+            Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in self?.updateIndex() },
         ]
         poll()
     }
