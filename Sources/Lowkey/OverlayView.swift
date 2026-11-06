@@ -150,7 +150,8 @@ struct OverlayView: View {
         ZStack(alignment: .topLeading) {
             if g.isFullScreen {
                 fullScreenCover(g).place(g.coverRect ?? .zero)
-                LyricsViewport(settings: settings, model: model, font: g.lyricFont, height: g.viewportHeight)
+                LyricsViewport(settings: settings, model: model, font: g.lyricFont, height: g.viewportHeight,
+                               width: g.lyricsRect.width)
                     .place(g.lyricsRect)
                 Button(action: onExitFullScreen) {
                     Image(systemName: "xmark")
@@ -166,7 +167,8 @@ struct OverlayView: View {
             } else if p.layout == .classic {
                 VStack(alignment: .leading, spacing: 14 * s) {
                     if p.showHeader { classicHeader }
-                    LyricsViewport(settings: settings, model: model, font: g.lyricFont, height: g.viewportHeight)
+                    LyricsViewport(settings: settings, model: model, font: g.lyricFont, height: g.viewportHeight,
+                                   width: g.size.width - 48 * s)
                 }
                 .padding(EdgeInsets(top: 20 * s, leading: 24 * s, bottom: 20 * s, trailing: 24 * s))
             } else {
@@ -174,7 +176,8 @@ struct OverlayView: View {
                 ForEach(Array(g.circles.enumerated()), id: \.offset) { index, rect in
                     circleButton(index, diameter: rect.width).place(rect)
                 }
-                LyricsViewport(settings: settings, model: model, font: g.lyricFont, height: g.viewportHeight)
+                LyricsViewport(settings: settings, model: model, font: g.lyricFont, height: g.viewportHeight,
+                               width: g.lyricsRect.width - 48 * s)
                     .padding(EdgeInsets(top: 16 * s, leading: 24 * s, bottom: 18 * s, trailing: 24 * s))
                     .place(g.lyricsRect)
             }
@@ -396,6 +399,7 @@ struct LyricsViewport: View {
     @ObservedObject var model: NowPlaying
     let font: Double
     let height: Double
+    let width: Double
 
     private var p: Prefs { settings.p }
     /// Spacing unit: follows the text size, not the size of the card.
@@ -444,7 +448,13 @@ struct LyricsViewport: View {
         ], startPoint: .top, endPoint: .bottom)
     }
 
-    private func lineHeight(_ id: Int) -> Double { Double(model.lineHeights[id] ?? font * 1.3) }
+    /// A line's height is worked out from its text before it's drawn, so a line that wraps onto a second
+    /// row always gets the room for it. The drawn height is used too when it's larger.
+    private func lineHeight(_ id: Int) -> Double {
+        let lines = model.displayLines
+        let computed = id < lines.count ? TextHeight.of(lines[id], font: font, width: width) : font * 1.3
+        return max(computed, Double(model.lineHeights[id] ?? 0))
+    }
 
     private func lineStack(_ lines: [LyricLine]) -> some View {
         let anchor = max(model.currentIndex, 0)
@@ -544,7 +554,7 @@ struct LineView: View {
 
     private func words(time: Double?) -> some View {
         let isActive = distance == 0
-        let progress = time.map { min(1, max(0, ($0 - line.start) / line.sungDuration)) } ?? (distance < 0 ? 1 : 0)
+        let progress = time.map { line.letterProgress(at: $0) } ?? (distance < 0 ? 1 : 0)
         return Text(line.text)
             .font(.system(size: font, weight: .bold))
             .kerning(-0.01 * font)
@@ -553,7 +563,10 @@ struct LineView: View {
             .textRenderer(LetterRiseRenderer(progress: animate ? progress : (distance <= 0 ? 1 : 0),
                                              lift: animate && isActive ? font * 0.06 : 0,
                                              riseDuration: 1.1 / max(line.sungDuration, 0.1),
-                                             maxLift: font * 0.06))
+                                             maxLift: font * 0.06,
+                                             lineTime: time.map { ($0 - line.start) / line.sungDuration } ?? 0,
+                                             emphases: animate && isActive ? line.emphases : [],
+                                             font: font))
             // Letters that have risen ease back down together when the line stops being current.
             .animation(animate ? .easeInOut(duration: 0.55) : nil, value: isActive)
     }
@@ -567,9 +580,16 @@ struct LetterRiseRenderer: TextRenderer, Animatable {
     /// One letter's rise, as a share of the line. A fixed time keeps it gentle on quick lines too.
     var riseDuration: Double
     var maxLift: Double
+    /// How far through the line the song is, 0...1, for held words.
+    var lineTime: Double = 0
+    var emphases: [Emphasis] = []
+    var font: Double = 22
 
-    /// Risen letters stay inside the area SwiftUI redraws.
-    var displayPadding: EdgeInsets { EdgeInsets(top: maxLift + 1, leading: 0, bottom: 0, trailing: 0) }
+    /// Risen, swollen and glowing letters stay inside the area SwiftUI redraws.
+    var displayPadding: EdgeInsets {
+        let room = emphases.isEmpty ? 0 : font * 0.45
+        return EdgeInsets(top: maxLift + 1 + room, leading: room, bottom: room, trailing: room)
+    }
 
     var animatableData: Double {
         get { lift }
@@ -594,6 +614,10 @@ struct LetterRiseRenderer: TextRenderer, Animatable {
                     var letter = context
                     letter.opacity = 0.5 + 0.5 * fill
                     letter.translateBy(x: 0, y: -lift * rise)
+                    if let held = emphases.first(where: { position >= $0.letterFrom && position < $0.letterTo }) {
+                        swell(&letter, glyph: glyph, held: held,
+                              letterIndex: index - Int((held.letterFrom * Double(total)).rounded()))
+                    }
                     // Without this, text snaps to the pixel grid and shakes during slow movement.
                     letter.draw(glyph, options: .disablesSubpixelQuantization)
                     index += 1
@@ -602,10 +626,63 @@ struct LetterRiseRenderer: TextRenderer, Animatable {
         }
     }
 
+    /// A held word's letters, one after another, grow a little, lean apart from the middle, float up
+    /// and glow, then settle back as the note ends.
+    private func swell(_ letter: inout GraphicsContext, glyph: Text.Layout.RunSlice, held: Emphasis, letterIndex: Int) {
+        let count = Double(held.letterCount)
+        let i = Double(max(0, min(held.letterCount - 1, letterIndex)))
+        // Measured in lengths of the word: the effect lasts at least a second, a little longer on the last word.
+        let span = max(1, held.seconds) * (held.isLastWord ? 1.2 : 1) / held.seconds
+        let local = (lineTime - held.timeFrom) / max(0.001, held.timeTo - held.timeFrom)
+        let delay = span / 2.5 / count * i
+        let x = min(1, max(0, (local - delay) / span))
+        let floatX = min(1, max(0, (local - delay) / (span * 1.4)))
+        guard x > 0 else { return }
+
+        // Rises quickly to its peak at the middle of the note, then eases back down.
+        let shape = x < 0.5 ? 1 - pow(1 - x * 2, 3) : 1 - Self.smoothed(x * 2 - 1)
+        let scale = 1 + shape * 0.1 * held.amount
+        let spreadX = -shape * 0.03 * held.amount * (count / 2 - i) * font
+        let floatY = -(sin(floatX * .pi) * 0.05 + floatX * 0.05) * font - shape * 0.025 * held.amount * font
+
+        let box = glyph.typographicBounds.rect
+        letter.translateBy(x: box.midX + spreadX, y: box.midY + floatY)
+        letter.scaleBy(x: scale, y: scale)
+        letter.translateBy(x: -box.midX, y: -box.midY)
+        let glow = shape * held.glow
+        if glow > 0.01 {
+            letter.addFilter(.shadow(color: .white.opacity(min(1, glow)), radius: min(0.3, held.glow * 0.3) * font))
+        }
+    }
+
     /// Starts and ends with no speed, so no letter visibly jerks.
     private static func smoothed(_ value: Double) -> Double {
         let x = min(1, max(0, value))
         return x * x * x * (x * (x * 6 - 15) + 10)
+    }
+}
+
+/// Measures lyric text the way it's drawn: bold system font, the same tracking and line spacing.
+enum TextHeight {
+    private static var cache: [String: Double] = [:]
+
+    static func of(_ line: LyricLine, font: Double, width: Double) -> Double {
+        if line.isInterlude { return font * 1.2 }
+        let key = "\(line.text)|\(Int(font * 10))|\(Int(width))"
+        if let known = cache[key] { return known }
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = font * 0.08
+        let text = NSAttributedString(string: line.text, attributes: [
+            .font: NSFont.systemFont(ofSize: font, weight: .bold),
+            .kern: -0.01 * font,
+            .paragraphStyle: style,
+        ])
+        let box = text.boundingRect(with: NSSize(width: max(1, width), height: .greatestFiniteMagnitude),
+                                    options: [.usesLineFragmentOrigin, .usesFontLeading])
+        let height = ceil(box.height)
+        if cache.count > 2000 { cache.removeAll() }
+        cache[key] = height
+        return height
     }
 }
 

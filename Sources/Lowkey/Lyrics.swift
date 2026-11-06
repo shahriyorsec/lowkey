@@ -3,8 +3,23 @@ import Foundation
 struct LyricWord: Identifiable {
     let id: Int
     let text: String
-    let from: Double   // share of the line's sung time, 0...1
+    let from: Double   // share of the line's letters, 0...1
     let to: Double
+    let timeFrom: Double   // share of the line's sung time, 0...1
+    let timeTo: Double
+}
+
+/// A word sung long enough to be emphasized: its letters swell, glow and float while it's held.
+struct Emphasis {
+    let letterFrom: Double   // the word's place in the line's letters, 0...1
+    let letterTo: Double
+    let timeFrom: Double     // when it's sung, as a share of the line
+    let timeTo: Double
+    let seconds: Double
+    let letterCount: Int
+    let amount: Double       // how much the letters grow and spread
+    let glow: Double         // how bright the glow gets
+    let isLastWord: Bool
 }
 
 struct LyricLine: Identifiable {
@@ -12,13 +27,18 @@ struct LyricLine: Identifiable {
     let start: Double
     let sungDuration: Double
     let words: [LyricWord]
+    var emphases: [Emphasis] = []
     var isInterlude: Bool { words.isEmpty }
     var text: String { words.map(\.text).joined(separator: " ") }
 
     /// LRC only times whole lines, so word timing is estimated from word length.
-    func progress(of word: LyricWord, at time: Double) -> Double {
-        let lineProgress = (time - start) / sungDuration
-        return min(1, max(0, (lineProgress - word.from) / max(0.001, word.to - word.from)))
+    /// How far through the line's letters the singing is. Time is shared out by syllables, so a
+    /// long word with few syllables moves quickly and a short drawn-out one slowly, as in singing.
+    func letterProgress(at time: Double) -> Double {
+        let t = min(1, max(0, (time - start) / sungDuration))
+        guard let word = words.first(where: { t < $0.timeTo }) ?? words.last else { return t }
+        let inWord = min(1, max(0, (t - word.timeFrom) / max(0.001, word.timeTo - word.timeFrom)))
+        return word.from + (word.to - word.from) * inWord
     }
 }
 
@@ -71,18 +91,47 @@ enum LRC {
             let next = index + 1 < items.count ? items[index + 1].0 : item.0 + 5
             let pieces = item.1.split(separator: " ").map(String.init)
             let total = max(1, pieces.reduce(0) { $0 + $1.count + 1 })
+            let available = next - item.0 - NowPlaying.lineLead
+
+            // A short gap follows each word; the last word of a line is usually held a little longer.
+            let weights = pieces.enumerated().map { wordIndex, piece in
+                Double(syllables(in: piece)) + 0.35 + (wordIndex == pieces.count - 1 ? 0.6 : 0)
+            }
+            let estimated = pieces.isEmpty ? next - item.0 : Double(total) * 0.11 + 1.0
+            // A pause after a line must not stretch the singing across the whole gap.
+            // It also ends just before the next line takes over, so the fill never snaps.
+            let sung = max(0.4, min(available, estimated))
+
+            let totalWeight = max(0.001, weights.reduce(0, +))
             var used = 0
+            var spent = 0.0
             let words: [LyricWord] = pieces.enumerated().map { wordIndex, piece in
                 let from = Double(used) / Double(total)
                 used += piece.count + 1
-                return LyricWord(id: wordIndex, text: piece, from: from, to: Double(used) / Double(total))
+                let timeFrom = spent / totalWeight
+                spent += weights[wordIndex]
+                return LyricWord(id: wordIndex, text: piece, from: from, to: Double(used) / Double(total),
+                                 timeFrom: timeFrom, timeTo: spent / totalWeight)
             }
-            // A pause after a line must not stretch the singing across the whole gap.
-            // It also ends just before the next line takes over, so the fill never snaps.
-            let estimated = pieces.isEmpty ? next - item.0 : Double(total) * 0.11 + 1.0
-            let sung = max(0.4, min(next - item.0 - NowPlaying.lineLead, estimated))
+
+            // Held-word emphasis needs real word timing, which line-timed lyrics don't have.
+            // Guessing it from the gap to the next line marked most lines as held, so it stays off.
             return LyricLine(id: index, start: item.0, sungDuration: sung, words: words)
         }
+    }
+
+    /// Vowel groups, roughly the sung syllables; works for English and similar spelling.
+    static func syllables(in word: String) -> Int {
+        let vowels = Set("aeiouyàáâäèéêëìíîïòóôöùúûüАаЕеЁёИиОоУуЫыЭэЮюЯя")
+        var count = 0, previousWasVowel = false
+        for character in word.lowercased() {
+            let isVowel = vowels.contains(character)
+            if isVowel && !previousWasVowel { count += 1 }
+            previousWasVowel = isVowel
+        }
+        // A silent final "e", as in "came", is not sung.
+        if count > 1, word.lowercased().hasSuffix("e"), !word.lowercased().hasSuffix("le") { count -= 1 }
+        return max(1, count)
     }
 
     static let sample: [LyricLine] = build([
