@@ -198,6 +198,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         registerSettingsShortcut()
         updateVisibility()
         AppIcon.apply(settings.p.appIcon)
+        LoginItem.apply(settings.p.openAtLogin)
+        settings.$p.map(\.openAtLogin).removeDuplicates().dropFirst().receive(on: RunLoop.main)
+            .sink { LoginItem.apply($0) }.store(in: &bag)
         settings.$p.map(\.appIcon).removeDuplicates().dropFirst().receive(on: RunLoop.main)
             .sink { AppIcon.apply($0) }.store(in: &bag)
         if CommandLine.arguments.contains("--edit") { setEditing(true) }

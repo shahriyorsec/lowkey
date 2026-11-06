@@ -103,6 +103,25 @@ struct IconArt: View {
     }
 }
 
+import ServiceManagement
+
+/// Opens Lowkey when you log in. Only the copy in /Applications registers, so a development
+/// build never takes the place of the installed app.
+enum LoginItem {
+    static var isInstalled: Bool { Bundle.main.bundlePath.hasPrefix("/Applications/") }
+
+    static func apply(_ enabled: Bool) {
+        guard isInstalled else { return }
+        let service = SMAppService.mainApp
+        do {
+            if enabled, service.status != .enabled { try service.register() }
+            if !enabled, service.status == .enabled { try service.unregister() }
+        } catch {
+            NSLog("Lowkey: login item change failed: \(error.localizedDescription)")
+        }
+    }
+}
+
 enum AppIcon {
     @MainActor
     static func image(_ theme: IconTheme, size: Double = 1024) -> NSImage? {

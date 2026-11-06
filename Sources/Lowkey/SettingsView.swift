@@ -254,6 +254,9 @@ private struct GeneralPane: View {
         GlassSection(title: "App Icon") {
             IconPicker(selection: $settings.p.appIcon)
         }
+        GlassSection(title: "Startup", footer: LoginItem.isInstalled ? nil : "Works once Lowkey is installed in Applications.") {
+            ToggleRow(title: "Open at login", isOn: $settings.p.openAtLogin)
+        }
         GlassSection(title: "Behavior") {
             ToggleRow(title: "Show playback controls", isOn: $settings.p.showControls)
             ToggleRow(title: "Click a lyric line to jump to it", isOn: $settings.p.clickToSeek)

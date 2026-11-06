@@ -59,6 +59,7 @@ struct Prefs: Codable, Equatable {
     var backgroundStyle = BackgroundStyle.albumColor
     var edgeStyle = EdgeStyle.lightEdge
     var appIcon = IconTheme.nightFlame
+    var openAtLogin = true
     var resizeFromEdges = true
     var glassDarkness = 0.14
     var showControls = true
