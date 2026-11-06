@@ -11,6 +11,9 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section("App Icon") {
+                IconPicker(selection: $settings.p.appIcon)
+            }
             Section("Layout") {
                 Picker("Layout", selection: $settings.p.layout) {
                     ForEach(CardLayout.allCases) { Text($0.label).tag($0) }

@@ -193,6 +193,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                                object: nil, queue: .main) { [weak self] _ in self?.updateFrame() }
         model.start()
         updateVisibility()
+        AppIcon.apply(settings.p.appIcon)
+        settings.$p.map(\.appIcon).removeDuplicates().dropFirst().receive(on: RunLoop.main)
+            .sink { AppIcon.apply($0) }.store(in: &bag)
         if CommandLine.arguments.contains("--edit") { setEditing(true) }
     }
 
@@ -387,7 +390,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func buildStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "music.note.list", accessibilityDescription: "Lowkey")
+        statusItem.button?.image = AppIcon.menuBarGlyph
+        statusItem.button?.image?.accessibilityDescription = "Lowkey"
         let menu = NSMenu()
         menu.delegate = self
         statusLine.isEnabled = false
