@@ -48,8 +48,10 @@ final class OverlayPanel: NSPanel {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isFloatingPanel = true
         level = .statusBar
-        // Stays on every desktop and above full-screen apps.
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        // Stays on every desktop and above full-screen apps. Auxiliary keeps it out of Stage Manager,
+        // which would otherwise gather it into Lowkey's own stage and hide it whenever another app is in front.
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle,
+                              .auxiliary, .canJoinAllApplications]
         isOpaque = false
         backgroundColor = .clear
         hasShadow = true
