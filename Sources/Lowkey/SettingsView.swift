@@ -262,6 +262,7 @@ private struct GeneralPane: View {
             ToggleRow(title: "Click a lyric line to jump to it", isOn: $settings.p.clickToSeek)
             ToggleRow(title: "Hide when paused", isOn: $settings.p.hideWhenPaused)
             ToggleRow(title: "Hide when no lyrics are found", isOn: $settings.p.hideWhenNoLyrics)
+            ToggleRow(title: "Hide while a video is playing", isOn: $settings.p.hideDuringVideo)
         }
     }
 }
@@ -394,6 +395,7 @@ private struct AboutPane: View {
         }
         GlassSection(title: "Shortcuts") {
             SettingRow(title: "Open Settings") { Text("⌃⌥⌘L").foregroundStyle(.secondary) }
+            SettingRow(title: "Hide or show the card") { Text("⌃⌥⌘H").foregroundStyle(.secondary) }
             SettingRow(title: "Move the card") { Text("⌥ Option + drag").foregroundStyle(.secondary) }
             SettingRow(title: "Exit full screen") { Text("Esc").foregroundStyle(.secondary) }
         }

@@ -153,6 +153,7 @@ final class ClickableHostingView<Content: View>: NSHostingView<Content> {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let settings = Settings.shared
     private let model = NowPlaying()
+    private let video = VideoWatcher()
     private let panel = OverlayPanel()
     private var statusItem: NSStatusItem!
     private var settingsWindow: NSWindow?
@@ -166,6 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var pointerTimer: Timer?
     private var settingsHotKey: EventHotKeyRef?
+    private var hideHotKey: EventHotKeyRef?
     private var resizeStart: (edges: ResizeEdges, mouse: NSPoint, frame: NSRect, scale: Double)?
     private var shownCursorZone: ResizeEdges = []
     private var fullScreenSize: CGSize?
@@ -197,6 +199,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                object: nil, queue: .main) { [weak self] _ in self?.updateFrame() }
         model.start()
+        video.start()
+        video.$isPlaying.removeDuplicates().receive(on: RunLoop.main).sink { [weak self] _ in self?.updateVisibility() }.store(in: &bag)
         registerSettingsShortcut()
         updateVisibility()
         AppIcon.apply(settings.p.appIcon)
@@ -214,7 +218,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let root = OverlayView(
             settings: settings, model: model, isEditing: editingBinding, fullScreenSize: fullScreenSize,
             onDone: { [weak self] in self?.setEditing(false) },
-            onExitFullScreen: { [weak self] in self?.setFullScreen(false) })
+            onExitFullScreen: { [weak self] in self?.setFullScreen(false) },
+            onHide: { [weak self] in self?.setUserHidden(true) })
         let host = ClickableHostingView(rootView: root)
         host.sizingOptions = []
         host.wantsLayer = true
@@ -272,6 +277,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let lyricsOK = !p.hideWhenNoLyrics || self.model.lyricsState == .ready || self.model.lyricsState == .loading
             // Pausing from the card's own button mustn't hide the button needed to resume.
             let holdForPointer = self.isVisible && self.model.isHovering && hasTrack
+            // Out of the way while a video plays, so it never covers YouTube or a movie.
+            if p.hideDuringVideo && self.video.isPlaying && self.fullScreenSize == nil && !self.isEditing {
+                self.setVisible(false)
+                return
+            }
             self.setVisible(self.fullScreenSize != nil || self.isEditing || (!self.userHidden && hasTrack && (playingOK || holdForPointer) && lyricsOK))
         }
     }
@@ -335,6 +345,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return NSRect(x: rect.minX, y: geometry.size.height - rect.maxY, width: rect.width, height: rect.height)
     }
 
+    private func hideRect() -> NSRect? {
+        let geometry = currentGeometry()
+        guard let rect = geometry.hideRect, !geometry.isFullScreen else { return nil }
+        return NSRect(x: rect.minX, y: geometry.size.height - rect.maxY, width: rect.width, height: rect.height)
+    }
+
     /// The lyric area, while it has lines that can be clicked.
     private func seekRect() -> NSRect? {
         guard settings.p.clickToSeek, !model.lines.isEmpty else { return nil }
@@ -350,7 +366,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let hovering = isVisible && panel.frame.contains(mouse)
         if model.isHovering != hovering { model.isHovering = hovering }
         let inWindow = NSPoint(x: mouse.x - panel.frame.minX, y: mouse.y - panel.frame.minY)
-        let onControls = hovering && ((controlsRect()?.contains(inWindow) ?? false) || (seekRect()?.contains(inWindow) ?? false))
+        let onControls = hovering && ((controlsRect()?.contains(inWindow) ?? false) || (seekRect()?.contains(inWindow) ?? false)
+            || (hideRect()?.contains(inWindow) ?? false))
         let resizeAllowed = fullScreenSize == nil && (settings.p.resizeFromEdges || isEditing)
         let zone = hovering && resizeAllowed ? ResizeEdges.zone(at: inWindow, in: panel.frame.size) : []
         panel.resizeEnabled = resizeAllowed
@@ -430,23 +447,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Opening Lowkey again (from Finder, Launchpad or Spotlight) while it runs shows Settings,
     /// since the menu bar icon can be hidden behind the notch on a full menu bar.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        // Opening Lowkey again also brings a hidden card back.
+        setUserHidden(false)
         openSettings()
         return false
     }
 
-    /// Control-Option-Command-L opens Settings from any app. A Carbon hot key needs no extra permission.
+    func setUserHidden(_ hidden: Bool) {
+        userHidden = hidden
+        updateVisibility()
+    }
+
+    /// Control-Option-Command-L opens Settings and Control-Option-Command-H hides or shows the card,
+    /// from any app. Carbon hot keys need no extra permission.
     private func registerSettingsShortcut() {
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, userData in
-            guard let userData else { return noErr }
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, userData in
+            guard let userData, let event else { return noErr }
+            var pressed = EventHotKeyID()
+            GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                              nil, MemoryLayout<EventHotKeyID>.size, nil, &pressed)
             let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
-            DispatchQueue.main.async { delegate.openSettings() }
+            DispatchQueue.main.async {
+                if pressed.id == 2 { delegate.setUserHidden(!delegate.isUserHidden) } else { delegate.openSettings() }
+            }
             return noErr
         }, 1, &spec, Unmanaged.passUnretained(self).toOpaque(), nil)
-        let id = EventHotKeyID(signature: OSType(0x4C4B5931), id: 1)
-        RegisterEventHotKey(UInt32(kVK_ANSI_L), UInt32(controlKey | optionKey | cmdKey), id,
+        let modifiers = UInt32(controlKey | optionKey | cmdKey)
+        RegisterEventHotKey(UInt32(kVK_ANSI_L), modifiers, EventHotKeyID(signature: OSType(0x4C4B5931), id: 1),
                             GetApplicationEventTarget(), 0, &settingsHotKey)
+        RegisterEventHotKey(UInt32(kVK_ANSI_H), modifiers, EventHotKeyID(signature: OSType(0x4C4B5931), id: 2),
+                            GetApplicationEventTarget(), 0, &hideHotKey)
     }
+
+    var isUserHidden: Bool { userHidden }
 
     func menuWillOpen(_ menu: NSMenu) {
         if model.permissionDenied {
@@ -458,7 +492,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         playItem.title = model.isPlaying ? "Pause" : "Play"
         fullScreenItem.title = fullScreenSize == nil ? "Full Screen Lyrics" : "Exit Full Screen"
-        toggleItem.title = userHidden ? "Show Overlay" : "Hide Overlay"
+        toggleItem.title = userHidden ? "Show Overlay   ⌃⌥⌘H" : "Hide Overlay   ⌃⌥⌘H"
         editItem.title = isEditing ? "Finish Editing" : "Edit Position and Size"
     }
 

@@ -15,6 +15,8 @@ struct CardGeometry: Equatable {
     var lyricsRect: CGRect
     var circles: [CGRect] = []
     var controlsRect: CGRect?
+    /// The cover art, which turns into a hide button under the pointer.
+    var hideRect: CGRect?
     /// Controls fade in on hover when the layout has no permanent place for them.
     var controlsOnHover = false
     var isFullScreen = false
@@ -58,6 +60,7 @@ struct CardGeometry: Equatable {
         }
 
         if p.layout == .classic {
+            if p.showHeader { hideRect = CGRect(x: 24 * s, y: 20 * s, width: 44 * s, height: 44 * s) }
             let chrome = (40 + (p.showHeader ? 58.0 : 0)) * s
             let height = total(chrome + autoLyrics)
             size = CGSize(width: w, height: height)
@@ -92,6 +95,8 @@ struct CardGeometry: Equatable {
                 controlsRect = CGRect(x: w - 142 * s, y: 0, width: 142 * s, height: topHeight)
             }
             let cover = CGRect(x: 0, y: 0, width: coverWidth, height: topHeight)
+            let artSide = (p.layout == .roundButtons ? 44 : 56) * s
+            hideRect = CGRect(x: (p.layout == .roundButtons ? 11 : 12) * s, y: (topHeight - artSide) / 2, width: artSide, height: artSide)
             coverRect = cover
             blocks = [GlassBlock(rect: cover, radius: radius), GlassBlock(rect: lyricsRect, radius: radius)]
                 + circles.map { GlassBlock(rect: $0, radius: topHeight / 2) }
@@ -122,6 +127,7 @@ struct OverlayView: View {
     var fullScreenSize: CGSize? = nil
     var onDone: () -> Void
     var onExitFullScreen: () -> Void = {}
+    var onHide: () -> Void = {}
 
     private var p: Prefs { settings.p }
     private var s: Double { p.scale }
@@ -297,6 +303,26 @@ struct OverlayView: View {
         }
         .frame(width: side * s, height: side * s)
         .clipShape(RoundedRectangle(cornerRadius: radius * s, style: .continuous))
+        .overlay { hideButton(side: side, radius: radius) }
+    }
+
+    /// Under the pointer the cover offers to hide the card for now; Lowkey keeps running.
+    @ViewBuilder
+    private func hideButton(side: Double, radius: Double) -> some View {
+        if model.isHovering && !isEditing && fullScreenSize == nil {
+            Button(action: onHide) {
+                Image(systemName: "eye.slash.fill")
+                    .font(.system(size: side * 0.34 * s, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: side * s, height: side * s)
+                    .background(RoundedRectangle(cornerRadius: radius * s, style: .continuous).fill(.black.opacity(0.5)))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Hide Lowkey for now (⌃⌥⌘H)")
+            .accessibilityLabel("Hide for now")
+            .transition(.opacity)
+        }
     }
 
     private func titles(titleSize: Double, artistSize: Double) -> some View {

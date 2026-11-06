@@ -88,6 +88,7 @@ struct Prefs: Codable, Equatable {
 
     var hideWhenPaused = true
     var hideWhenNoLyrics = false
+    var hideDuringVideo = true
 }
 
 final class Settings: ObservableObject {
