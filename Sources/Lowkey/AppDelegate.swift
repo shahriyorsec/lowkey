@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import Combine
 import SwiftUI
 
@@ -153,6 +154,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let panel = OverlayPanel()
     private var statusItem: NSStatusItem!
     private var settingsWindow: NSWindow?
+    private let settingsNavigation = SettingsNavigation()
     private var bag = Set<AnyCancellable>()
 
     private var userHidden = false
@@ -161,6 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var isVisible = false
 
     private var pointerTimer: Timer?
+    private var settingsHotKey: EventHotKeyRef?
     private var resizeStart: (edges: ResizeEdges, mouse: NSPoint, frame: NSRect, scale: Double)?
     private var shownCursorZone: ResizeEdges = []
     private var fullScreenSize: CGSize?
@@ -192,6 +195,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                object: nil, queue: .main) { [weak self] _ in self?.updateFrame() }
         model.start()
+        registerSettingsShortcut()
         updateVisibility()
         AppIcon.apply(settings.p.appIcon)
         settings.$p.map(\.appIcon).removeDuplicates().dropFirst().receive(on: RunLoop.main)
@@ -410,12 +414,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.target = self
             menu.addItem(item)
         }
-        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        let settingsItem = NSMenuItem(title: "Settings…   ⌃⌥⌘L", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit Lowkey", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         statusItem.menu = menu
+    }
+
+    /// Opening Lowkey again (from Finder, Launchpad or Spotlight) while it runs shows Settings,
+    /// since the menu bar icon can be hidden behind the notch on a full menu bar.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openSettings()
+        return false
+    }
+
+    /// Control-Option-Command-L opens Settings from any app. A Carbon hot key needs no extra permission.
+    private func registerSettingsShortcut() {
+        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { _, _, userData in
+            guard let userData else { return noErr }
+            let delegate = Unmanaged<AppDelegate>.fromOpaque(userData).takeUnretainedValue()
+            DispatchQueue.main.async { delegate.openSettings() }
+            return noErr
+        }, 1, &spec, Unmanaged.passUnretained(self).toOpaque(), nil)
+        let id = EventHotKeyID(signature: OSType(0x4C4B5931), id: 1)
+        RegisterEventHotKey(UInt32(kVK_ANSI_L), UInt32(controlKey | optionKey | cmdKey), id,
+                            GetApplicationEventTarget(), 0, &settingsHotKey)
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -441,14 +466,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateVisibility()
     }
 
-    @objc private func openSettings() {
+    @objc func openSettings() {
         if settingsWindow == nil {
             let window = NSWindow(contentViewController: NSHostingController(
-                rootView: SettingsView(settings: settings,
+                rootView: SettingsView(settings: settings, navigation: settingsNavigation,
                                        onEdit: { [weak self] in self?.setEditing(true) },
                                        onFullScreen: { [weak self] in self?.setFullScreen(true) })))
             window.title = "Lowkey Settings"
-            window.styleMask = [.titled, .closable, .miniaturizable]
+            // A unified toolbar lets the sidebar run to the top of the window, as in System Settings.
+            window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+            window.toolbar = NSToolbar(identifier: "settings")
+            window.toolbarStyle = .unified
+            window.titlebarAppearsTransparent = true
+            window.setContentSize(NSSize(width: 760, height: 580))
             window.isReleasedWhenClosed = false
             window.center()
             settingsWindow = window

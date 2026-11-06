@@ -173,7 +173,7 @@ struct IconPicker: View {
                     VStack(spacing: 5) {
                         IconArt(theme: theme, size: 46, withMargin: false)
                             .padding(3)
-                            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
                                 .strokeBorder(selection == theme ? Color.accentColor : .clear, lineWidth: 2))
                         Text(theme.name).font(.caption).foregroundStyle(selection == theme ? .primary : .secondary)
                     }
