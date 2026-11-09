@@ -16,6 +16,30 @@ enum LyricsState: Equatable { case idle, loading, ready, missing }
 /// Follows the Spotify app over AppleScript and holds the song's lyrics and colors.
 final class NowPlaying: ObservableObject {
     @Published private(set) var track: Track?
+    /// Where the time bar is being dragged to, as a share of the song; nil when not dragging.
+    @Published var scrubFraction: Double?
+    /// The pointer is on the cover art, which then offers to hide the card.
+    @Published var isHoveringCover = false
+    /// The line the lyrics are scrolled to while browsing with the scroll wheel; nil follows the song.
+    @Published private(set) var browseAnchor: Int?
+    private var browseReset: DispatchWorkItem?
+
+    /// Moves the lyrics by whole lines. A few seconds after the last scroll they glide back to the song.
+    func browse(by step: Int) {
+        let lines = displayLines
+        guard !lines.isEmpty, step != 0 else { return }
+        let start = browseAnchor ?? max(currentIndex, 0)
+        browseAnchor = min(lines.count - 1, max(0, start + step))
+        browseReset?.cancel()
+        let reset = DispatchWorkItem { [weak self] in self?.browseAnchor = nil }
+        browseReset = reset
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: reset)
+    }
+
+    func stopBrowsing() {
+        browseReset?.cancel()
+        browseAnchor = nil
+    }
     @Published private(set) var isPlaying = false
     @Published private(set) var permissionDenied = false
     @Published private(set) var lines: [LyricLine] = []
@@ -24,6 +48,26 @@ final class NowPlaying: ObservableObject {
     @Published private(set) var artwork: NSImage?
     @Published var isHovering = false
     @Published private(set) var meshColors: [RGB] = CoverColors.fallback
+    /// The colors the background is blending away from, and when the blend began.
+    private(set) var meshFrom: [RGB] = CoverColors.fallback
+    private(set) var meshChangedAt = Date.distantPast
+    static let meshBlend = 1.4
+    /// Covers and their colors already worked out, so going back to a song recolors at once.
+    private var coverCache: [String: (image: NSImage, colors: [RGB]?)] = [:]
+
+    /// Starts a blend from whatever is showing right now, even halfway through an earlier blend,
+    /// so a quick skip never makes the colors jump.
+    private func setMesh(_ colors: [RGB]) {
+        guard colors != meshColors else { return }
+        let progress = min(1, max(0, Date().timeIntervalSince(meshChangedAt) / Self.meshBlend))
+        if progress < 1, meshFrom.count == meshColors.count {
+            meshFrom = zip(meshFrom, meshColors).map { $0.mixed(with: $1, progress) }
+        } else {
+            meshFrom = meshColors
+        }
+        meshChangedAt = Date()
+        meshColors = colors
+    }
     @Published private(set) var lineHeights: [Int: CGFloat] = [:]
     @Published var isSampleMode = false {
         didSet {
@@ -49,6 +93,7 @@ final class NowPlaying: ObservableObject {
     /// Jumps the song to a time. The display moves at once, and the next few polls are ignored,
     /// since Spotify can still report the old position for a moment.
     func seek(to time: Double) {
+        stopBrowsing()
         let target = max(0, time)
         anchorPosition = target - Settings.shared.p.syncOffset
         anchorDate = Date()
@@ -105,6 +150,19 @@ final class NowPlaying: ObservableObject {
         }
         let elapsed = isPlaying ? date.timeIntervalSince(anchorDate) : 0
         return anchorPosition + elapsed + Settings.shared.p.syncOffset
+    }
+
+    /// Where the song really is, without the sync offset, for the time bar.
+    func playbackPosition(at date: Date) -> Double {
+        time(at: date) - (isSampleMode && track == nil ? 0 : Settings.shared.p.syncOffset)
+    }
+
+    var displayDuration: Double { isSampleMode && track == nil ? LRC.sampleLength : (track?.duration ?? 0) }
+
+    /// Jumps to a share of the song, from the time bar.
+    func seek(toFraction fraction: Double) {
+        guard track != nil, displayDuration > 0 else { return }
+        seek(to: min(1, max(0, fraction)) * displayDuration + Settings.shared.p.syncOffset)
     }
 
     var displayLines: [LyricLine] { isSampleMode && track == nil ? LRC.sample : lines }
@@ -173,7 +231,7 @@ final class NowPlaying: ObservableObject {
         currentIndex = -1
         lineHeights = [:]
         guard let track else {
-            lines = []; lyricsState = .idle; artwork = nil; meshColors = CoverColors.fallback
+            lines = []; lyricsState = .idle; artwork = nil; setMesh(CoverColors.fallback)
             return
         }
         if let cached = cache[track.id] {
@@ -193,15 +251,23 @@ final class NowPlaying: ObservableObject {
                 }
             }
         }
+        if let cached = coverCache[track.artworkURL] {
+            artwork = cached.image
+            if let colors = cached.colors { setMesh(colors) }
+            return
+        }
         artworkTask = Task { [weak self] in
             guard let url = URL(string: track.artworkURL),
                   let (data, _) = try? await URLSession.shared.data(from: url),
                   let image = NSImage(data: data) else { return }
             let colors = CoverColors.meshColors(from: image)
             await MainActor.run {
-                guard let self, !Task.isCancelled, self.track?.id == track.id else { return }
+                guard let self else { return }
+                if self.coverCache.count > 40 { self.coverCache.removeAll() }
+                self.coverCache[track.artworkURL] = (image, colors)
+                guard !Task.isCancelled, self.track?.id == track.id else { return }
                 self.artwork = image
-                if let colors { self.meshColors = colors }
+                if let colors { self.setMesh(colors) }
             }
         }
     }

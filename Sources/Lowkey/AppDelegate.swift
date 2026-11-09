@@ -84,15 +84,29 @@ final class OverlayPanel: NSPanel {
     var onResizing: ((NSPoint) -> Void)?
     var onResizeEnded: (() -> Void)?
     private var dragTimer: Timer?
+    /// The time bar: whether a point (window coordinates) is on it, and the song share under a screen point.
+    var isOnTimeBar: ((NSPoint) -> Bool)?
+    var timeBarFraction: ((NSPoint) -> Double?)?
+    var onScrub: ((Double?) -> Void)?
+    var onScrubEnded: (() -> Void)?
+    var onScroll: ((NSEvent) -> Void)?
 
     /// Dragging lives here, not in SwiftUI, so it works however the card is laid out and
     /// doesn't need the app to be active. Edit mode keeps its two controls clickable.
     override func sendEvent(_ event: NSEvent) {
+        if event.type == .scrollWheel, let onScroll {
+            onScroll(event)
+            return
+        }
         if event.type == .leftMouseDown {
             let onDoneButton = isEditing && event.locationInWindow.x > frame.width - 96 && event.locationInWindow.y > frame.height - 48
             let zone = resizeEnabled && !onDoneButton ? ResizeEdges.zone(at: event.locationInWindow, in: frame.size) : []
             if !zone.isEmpty {
                 trackResize(zone)
+                return
+            }
+            if !isEditing, !event.modifierFlags.contains(.option), isOnTimeBar?(event.locationInWindow) == true {
+                trackScrub()
                 return
             }
             if startsDrag(event) {
@@ -108,6 +122,24 @@ final class OverlayPanel: NSPanel {
         guard isEditing else { return false }
         let point = event.locationInWindow
         return !(point.x > frame.width - 96 && point.y > frame.height - 48)
+    }
+
+    /// Like dragging the window, the time bar reads the pointer directly while the button is down.
+    private func trackScrub() {
+        dragTimer?.invalidate()
+        onScrub?(timeBarFraction?(NSEvent.mouseLocation))
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            guard let self else { return timer.invalidate() }
+            if NSEvent.pressedMouseButtons & 1 == 0 {
+                timer.invalidate()
+                self.dragTimer = nil
+                self.onScrubEnded?()
+            } else {
+                self.onScrub?(self.timeBarFraction?(NSEvent.mouseLocation))
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        dragTimer = timer
     }
 
     private func trackResize(_ edges: ResizeEdges) {
@@ -172,6 +204,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private var userHidden = false
     private var spaceTimer: Timer?
+    private var scrollRemainder = 0.0
     /// Set when the user brings the card back during a video; lasts until that video stops.
     private var videoDismissed = false
     private var hiddenByVideo: Bool {
@@ -212,6 +245,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.onResizeBegan = { [weak self] in self?.beginResize($0) }
         panel.onResizing = { [weak self] in self?.handleResize($0) }
         panel.onResizeEnded = { [weak self] in self?.resizeStart = nil }
+        panel.isOnTimeBar = { [weak self] point in self?.timeBarRect()?.contains(point) ?? false }
+        panel.timeBarFraction = { [weak self] mouse in
+            guard let self, let bar = self.currentGeometry().progressBarRect, bar.width > 0 else { return nil }
+            return min(1, max(0, (mouse.x - self.panel.frame.minX - bar.minX) / bar.width))
+        }
+        panel.onScrub = { [weak self] fraction in
+            if let fraction { self?.model.scrubFraction = fraction }
+        }
+        panel.onScroll = { [weak self] event in self?.handleScroll(event) }
+        panel.onScrubEnded = { [weak self] in
+            guard let self else { return }
+            if let target = self.model.scrubFraction { self.model.seek(toFraction: target) }
+            self.model.scrubFraction = nil
+        }
         pointerTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in self?.updateMouseHandling() }
         fitToScreen()
         updateFrame()
@@ -237,7 +284,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // The window server updates which desktop is showing a moment after the switch.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self?.keepOnThisDesktop() }
         }
-        spaceTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.keepOnThisDesktop() }
+        spaceTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.keepOnThisDesktop() }
         updateVisibility()
         AppIcon.apply(settings.p.appIcon)
         LoginItem.apply(settings.p.openAtLogin)
@@ -277,7 +324,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let size = panelSize()
+        // The window shadow traces every visible pixel, so it would draw a dark outline around
+        // the time bar floating between the blocks. That mode goes without it.
+        let geometry = currentGeometry()
         panel.hasShadow = settings.p.backgroundStyle != .transparent
+            && !(geometry.progressBetweenBlocks && geometry.progressPill == nil)
         let frame = NSRect(origin: origin(for: size), size: size).integral
         if panel.frame != frame { panel.setFrame(frame, display: true) }
         // The shadow follows the card's outline, which a setting can change without resizing the window.
@@ -326,9 +377,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func keepOnThisDesktop() {
-        guard isVisible, panel.isVisible, !panel.isOnActiveSpace else { return }
-        NSLog("Lowkey: card was missing from this desktop, putting it back on every desktop")
+        guard isVisible, panel.isVisible,
+              Desktops.isStuckElsewhere(panel) || Desktops.isPinned(panel) else { return }
+        NSLog("Lowkey: card was pinned to another desktop, putting it back on every desktop")
         panel.rejoinEveryDesktop()
+        // If macOS still keeps it on the old desktop, bring it to this one directly.
+        if Desktops.isStuckElsewhere(panel), let active = Desktops.activeSpace {
+            NSLog("Lowkey: moving card to the current desktop")
+            Desktops.move(panel, to: active)
+            panel.collectionBehavior = OverlayPanel.everyDesktop
+            panel.orderFrontRegardless()
+        }
     }
 
     private func setVisible(_ visible: Bool) {
@@ -390,6 +449,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return NSRect(x: rect.minX, y: geometry.size.height - rect.maxY, width: rect.width, height: rect.height)
     }
 
+    /// Scrolling over the lyrics browses them line by line. Trackpads send small precise steps,
+    /// which add up to a line; a mouse wheel moves a line per notch.
+    private func handleScroll(_ event: NSEvent) {
+        guard let rect = seekRect() else { return }
+        let point = NSPoint(x: NSEvent.mouseLocation.x - panel.frame.minX, y: NSEvent.mouseLocation.y - panel.frame.minY)
+        guard rect.contains(point) else { return }
+        if event.hasPreciseScrollingDeltas {
+            scrollRemainder += event.scrollingDeltaY
+            let step = max(18, currentGeometry().lyricFont * 1.4)
+            while abs(scrollRemainder) >= step {
+                model.browse(by: scrollRemainder > 0 ? -1 : 1)
+                scrollRemainder -= scrollRemainder > 0 ? step : -step
+            }
+        } else if event.scrollingDeltaY != 0 {
+            model.browse(by: event.scrollingDeltaY > 0 ? -1 : 1)
+        }
+    }
+
+    /// The time row, a little taller than drawn so the thin bar is easy to catch.
+    private func timeBarRect() -> NSRect? {
+        let geometry = currentGeometry()
+        guard let row = geometry.progressRect, model.track != nil, model.displayDuration > 0 else { return nil }
+        return NSRect(x: row.minX, y: geometry.size.height - row.maxY - 3, width: row.width, height: row.height + 6)
+    }
+
     private func hideRect() -> NSRect? {
         let geometry = currentGeometry()
         guard let rect = geometry.hideRect, !geometry.isFullScreen else { return nil }
@@ -411,8 +495,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let hovering = isVisible && panel.frame.contains(mouse)
         if model.isHovering != hovering { model.isHovering = hovering }
         let inWindow = NSPoint(x: mouse.x - panel.frame.minX, y: mouse.y - panel.frame.minY)
+        // The hide button shows only over the cover art, not anywhere on the card.
+        let onCover = hovering && (hideRect()?.contains(inWindow) ?? false)
+        if model.isHoveringCover != onCover { model.isHoveringCover = onCover }
         let onControls = hovering && ((controlsRect()?.contains(inWindow) ?? false) || (seekRect()?.contains(inWindow) ?? false)
-            || (hideRect()?.contains(inWindow) ?? false))
+            || (hideRect()?.contains(inWindow) ?? false) || (timeBarRect()?.contains(inWindow) ?? false))
         let resizeAllowed = fullScreenSize == nil && (settings.p.resizeFromEdges || isEditing)
         let zone = hovering && resizeAllowed ? ResizeEdges.zone(at: inWindow, in: panel.frame.size) : []
         panel.resizeEnabled = resizeAllowed

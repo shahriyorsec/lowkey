@@ -17,6 +17,23 @@ struct CardGeometry: Equatable {
     var controlsRect: CGRect?
     /// The cover art, which turns into a hide button under the pointer.
     var hideRect: CGRect?
+    /// The time row under the title: elapsed time, the bar, and time left.
+    var progressRect: CGRect?
+    /// The time row floats in the gap between the blocks, with no glass behind it.
+    var progressBetweenBlocks = false
+    /// A small glass block of its own behind the floating time row (Glass Pill look).
+    var progressPill: CGRect?
+    /// Two Blocks: the time row runs under both the title and the playback buttons.
+    var progressWide = false
+    static func progressLabelWidth(_ s: Double, floating: Bool = false) -> Double { (floating ? 36 : 30) * s }
+    static func progressSpacing(_ s: Double) -> Double { 6 * s }
+    /// The draggable bar inside the time row.
+    var progressBarRect: CGRect? {
+        guard let row = progressRect else { return nil }
+        let side = Self.progressLabelWidth(scale, floating: progressBetweenBlocks || progressWide) + Self.progressSpacing(scale)
+        return CGRect(x: row.minX + side, y: row.minY, width: max(0, row.width - side * 2), height: row.height)
+    }
+    var scale: Double = 1
     /// Controls fade in on hover when the layout has no permanent place for them.
     var controlsOnHover = false
     var isFullScreen = false
@@ -28,10 +45,12 @@ struct CardGeometry: Equatable {
     static let width = 440.0
     static let minWidth = 300.0
     static let minHeight = 130.0
+    static func progressRowHeight(_ layout: CardLayout) -> Double { layout == .roundButtons ? 12 : 14 }
     static func lyricsHeight(_ p: Prefs) -> Double { Double(p.visibleLines) * (p.fontSize * 1.82) }
 
     init(_ p: Prefs, fullScreen: CGSize? = nil) {
         let s = p.scale, gap = 10 * s, radius = p.cornerRadius * s
+        scale = s
         lyricFont = p.fontSize * s
         viewportHeight = 0
 
@@ -80,6 +99,10 @@ struct CardGeometry: Equatable {
         } else {
             let round = p.layout == .roundButtons && p.showControls
             let topHeight = (p.layout == .roundButtons ? 66 : 80) * s
+            let between = p.timeBar == .betweenBlocks
+            // A wider gap holds the floating time row.
+            let pill = between && p.timeBarLook == .glassPill
+            let gap = pill ? 44 * s : between ? 34 * s : gap
             let height = max(topHeight + gap + 60 * s, total(topHeight + gap + 34 * s + autoLyrics))
             size = CGSize(width: w, height: height)
             lyricsRect = CGRect(x: 0, y: topHeight + gap, width: w, height: height - topHeight - gap)
@@ -96,10 +119,36 @@ struct CardGeometry: Equatable {
             }
             let cover = CGRect(x: 0, y: 0, width: coverWidth, height: topHeight)
             let artSide = (p.layout == .roundButtons ? 44 : 56) * s
-            hideRect = CGRect(x: (p.layout == .roundButtons ? 11 : 12) * s, y: (topHeight - artSide) / 2, width: artSide, height: artSide)
+            let art = CGRect(x: (p.layout == .roundButtons ? 11 : 12) * s, y: (topHeight - artSide) / 2, width: artSide, height: artSide)
+            hideRect = art
+            // The time row lines up with the bottom of the cover art, under the title and artist.
+            let textX = art.maxX + (p.layout == .roundButtons ? 10 : 12) * s
+            let textRight = round ? coverWidth - 14 * s
+                : p.showControls ? w - (10 + 132 + 12) * s : w - 10 * s
+            let rowHeight = Self.progressRowHeight(p.layout) * s
+            let rowY = art.maxY - rowHeight + (p.layout == .roundButtons ? 4 : 1) * s
+            if between {
+                let row = 18 * s
+                let inset = (pill ? 12 : 8) * s
+                progressRect = CGRect(x: inset, y: topHeight + (gap - row) / 2, width: w - inset * 2, height: row)
+                progressBetweenBlocks = true
+                if pill {
+                    let height = 26 * s
+                    progressPill = CGRect(x: 0, y: topHeight + (gap - height) / 2, width: w, height: height)
+                }
+            } else if p.timeBar == .underTitle && p.layout == .twoBlocks {
+                // Bigger, and wide enough to run under the buttons too; the buttons move up beside the title.
+                let row = 17 * s
+                let y = art.maxY - row + 2 * s
+                progressRect = CGRect(x: textX, y: y, width: w - 16 * s - textX, height: row)
+                progressWide = true
+            } else if p.timeBar == .underTitle && textRight - textX > 120 * s {
+                progressRect = CGRect(x: textX, y: rowY, width: textRight - textX, height: rowHeight)
+            }
             coverRect = cover
             blocks = [GlassBlock(rect: cover, radius: radius), GlassBlock(rect: lyricsRect, radius: radius)]
                 + circles.map { GlassBlock(rect: $0, radius: topHeight / 2) }
+                + (progressPill.map { [GlassBlock(rect: $0, radius: $0.height / 2)] } ?? [])
         }
     }
 }
@@ -179,6 +228,19 @@ struct OverlayView: View {
                 .padding(EdgeInsets(top: 20 * s, leading: 24 * s, bottom: 20 * s, trailing: 24 * s))
             } else {
                 if let cover = g.coverRect { coverBlock(g).place(cover) }
+                if showsProgress(g), let row = g.progressRect {
+                    let floating = g.progressBetweenBlocks
+                    let look = floating ? p.timeBarLook : .glassPill
+                    SongProgress(model: model, scale: s,
+                                 fontSize: floating ? 12 : g.progressWide ? 11 : p.layout == .roundButtons ? 9.5 : 10,
+                                 labelWidth: CardGeometry.progressLabelWidth(s, floating: floating || g.progressWide),
+                                 spacing: CardGeometry.progressSpacing(s),
+                                 barHeight: floating ? (g.progressPill != nil ? 4 : 5) * s : g.progressWide ? 4 * s : nil,
+                                 floating: floating && look != .glassPill,
+                                 tint: floating && look == .albumColor ? albumTint : nil)
+                        .place(row)
+                        .allowsHitTesting(false)
+                }
                 ForEach(Array(g.circles.enumerated()), id: \.offset) { index, rect in
                     circleButton(index, diameter: rect.width).place(rect)
                 }
@@ -216,15 +278,18 @@ struct OverlayView: View {
                 }
                 Group {
                     if p.showColorBlobs {
-                        let meshColors = p.useArtworkColors ? model.meshColors : CoverColors.meshColors(fromCustom: settings.customRGB)
-                        LiquidBackground(colors: meshColors, animated: moving)
-                            .opacity(p.colorStrength)
-                            .id(meshColors.map { "\($0.r)\($0.g)\($0.b)" }.joined())
-                            .transition(.opacity)
+                        if p.useArtworkColors {
+                            LiquidBackground(colors: model.meshColors, from: model.meshFrom,
+                                             changedAt: model.meshChangedAt, animated: moving)
+                                .opacity(p.colorStrength)
+                        } else {
+                            let custom = CoverColors.meshColors(fromCustom: settings.customRGB)
+                            LiquidBackground(colors: custom, from: custom, changedAt: .distantPast, animated: moving)
+                                .opacity(p.colorStrength)
+                        }
                     }
                     Color.black.opacity(p.panelOpacity)
                 }
-                .animation(.easeInOut(duration: 0.9), value: model.meshColors)
                 .clipShape(shape)
                 edge(g)
             case .blurOnly:
@@ -261,6 +326,11 @@ struct OverlayView: View {
             }
             .lineLimit(1)
             .frame(width: art)
+            if model.track != nil && model.displayDuration > 0 {
+                SongProgress(model: model, scale: 1, fontSize: 1.5 * unit, labelWidth: 5 * unit,
+                             spacing: unit, barHeight: 0.6 * unit, draggable: true)
+                    .frame(width: art * 1.15, height: 3 * unit)
+            }
             PlaybackControls(model: model, scale: 1, buttonSize: 7 * unit, iconSize: 2.6 * unit,
                              mainIconSize: 3.8 * unit, buttonHeight: 7 * unit)
         }
@@ -309,7 +379,7 @@ struct OverlayView: View {
     /// Under the pointer the cover offers to hide the card for now; Lowkey keeps running.
     @ViewBuilder
     private func hideButton(side: Double, radius: Double) -> some View {
-        if model.isHovering && !isEditing && fullScreenSize == nil {
+        if model.isHoveringCover && !isEditing && fullScreenSize == nil {
             Button(action: onHide) {
                 Image(systemName: "eye.slash.fill")
                     .font(.system(size: side * 0.34 * s, weight: .semibold))
@@ -325,8 +395,36 @@ struct OverlayView: View {
         }
     }
 
-    private func titles(titleSize: Double, artistSize: Double) -> some View {
-        VStack(alignment: .leading, spacing: 2 * s) {
+    /// One strong color from the cover for the Album Color time bar: saturated and mid-bright,
+    /// so it stands out over both white and dark windows.
+    private var albumTint: Color {
+        let list = p.useArtworkColors ? model.meshColors : CoverColors.meshColors(fromCustom: settings.customRGB)
+        let best = list.max { a, b in
+            func saturation(_ c: RGB) -> Double { let hi = max(c.r, c.g, c.b); return hi == 0 ? 0 : (hi - min(c.r, c.g, c.b)) / hi }
+            return saturation(a) < saturation(b)
+        } ?? RGB(r: 0.55, g: 0.35, b: 0.95)
+        var h: CGFloat = 0, sat: CGFloat = 0, bri: CGFloat = 0, a: CGFloat = 0
+        NSColor(srgbRed: best.r, green: best.g, blue: best.b, alpha: 1).getHue(&h, saturation: &sat, brightness: &bri, alpha: &a)
+        // Blue at full brightness still looks dark, so judge by perceived lightness: lighten toward
+        // white until it sits in the middle (about 18% luminance), readable on white and on black alike.
+        let pure = NSColor(hue: h, saturation: max(sat, 0.7), brightness: 1, alpha: 1)
+        func linear(_ c: CGFloat) -> CGFloat { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
+        var mix: CGFloat = 0, color = pure
+        while mix < 0.7 {
+            color = pure.blended(withFraction: mix, of: .white) ?? pure
+            let lum = 0.2126 * linear(color.redComponent) + 0.7152 * linear(color.greenComponent) + 0.0722 * linear(color.blueComponent)
+            if lum >= 0.18 { break }
+            mix += 0.05
+        }
+        return Color(nsColor: color)
+    }
+
+    private func showsProgress(_ g: CardGeometry) -> Bool {
+        g.progressRect != nil && (model.track != nil || model.isSampleMode) && model.displayDuration > 0
+    }
+
+    private func titles(titleSize: Double, artistSize: Double, spacing: Double = 2) -> some View {
+        VStack(alignment: .leading, spacing: spacing * s) {
             Text(model.track?.title ?? "Lowkey")
                 .font(.system(size: titleSize * s, weight: .semibold))
                 .foregroundStyle(.white)
@@ -343,10 +441,23 @@ struct OverlayView: View {
         let isRound = p.layout == .roundButtons
         return HStack(spacing: (isRound ? 10 : 12) * s) {
             artwork(side: isRound ? 44 : 56, radius: isRound ? 10 : 12)
-            titles(titleSize: isRound ? 14 : 15, artistSize: isRound ? 12 : 13)
+            if showsProgress(g) && !g.progressBetweenBlocks {
+                // Title and artist sit at the top of the cover art; the time row takes its bottom edge.
+                VStack(alignment: .leading, spacing: 0) {
+                    titles(titleSize: isRound ? 14 : 15, artistSize: isRound ? 12 : 13, spacing: isRound ? 0 : 1)
+                    Spacer(minLength: 0)
+                }
+                .frame(height: (isRound ? 44 : 56) * s)
+                .offset(y: (isRound ? -2 : 0) * s)
+            } else {
+                titles(titleSize: isRound ? 14 : 15, artistSize: isRound ? 12 : 13)
+            }
             Spacer(minLength: 0)
             if !isRound && p.showControls {
                 PlaybackControls(model: model, scale: s, buttonSize: 44, iconSize: 16, mainIconSize: 22)
+                    // With the wide time row below, the buttons sit level with the title instead.
+                    .offset(y: showsProgress(g) && g.progressWide
+                        ? ((g.progressRect?.minY ?? 0) - (g.coverRect?.height ?? 0)) / 2 : 0)
             }
         }
         .padding(EdgeInsets(top: 0, leading: (isRound ? 11 : 12) * s, bottom: 0, trailing: (isRound ? 14 : 10) * s))
@@ -451,16 +562,27 @@ struct LyricsViewport: View {
         .mask(fadeMask(height: height))
     }
 
+    @ViewBuilder
     private var message: some View {
-        let text: String
         switch model.lyricsState {
-        case .loading: text = "Finding lyrics…"
-        case .missing: text = "No synced lyrics for this song"
-        default: text = "Play something on Spotify"
+        case .missing:
+            VStack(alignment: .leading, spacing: 3 * s) {
+                Text("No lyrics for this one")
+                    .font(.system(size: 18 * s, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.92))
+                Text("Just vibes")
+                    .font(.system(size: 13 * s, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.55))
+            }
+        case .loading:
+            Text("Finding lyrics…")
+                .font(.system(size: 15 * s, weight: .medium))
+                .foregroundStyle(.white.opacity(0.8))
+        default:
+            Text("Play something on Spotify")
+                .font(.system(size: 15 * s, weight: .medium))
+                .foregroundStyle(.white.opacity(0.8))
         }
-        return Text(text)
-            .font(.system(size: 15 * s, weight: .medium))
-            .foregroundStyle(.white.opacity(0.8))
     }
 
     private func fadeMask(height: Double) -> some View {
@@ -483,7 +605,8 @@ struct LyricsViewport: View {
     }
 
     private func lineStack(_ lines: [LyricLine]) -> some View {
-        let anchor = max(model.currentIndex, 0)
+        let browsing = model.browseAnchor != nil
+        let anchor = model.browseAnchor ?? max(model.currentIndex, 0)
         // Lines outside the viewport stay rendered: they're measured before they scroll in,
         // and fade out fully before they're dropped, so nothing pops.
         let lower = max(0, anchor - 4)
@@ -492,6 +615,8 @@ struct LyricsViewport: View {
         return ZStack(alignment: .topLeading) {
             ForEach(lines[lower...upper]) { line in
                 let d = line.id - model.currentIndex
+                // While browsing, lines are placed and faded around the scrolled-to line instead.
+                let v = browsing ? line.id - anchor : d
                 Button {
                     model.seek(to: line.start)
                 } label: {
@@ -501,17 +626,19 @@ struct LyricsViewport: View {
                 }
                 .buttonStyle(LinePress())
                 .disabled(!p.clickToSeek || model.isSampleMode)
-                .allowsHitTesting(opacity(d) > 0)
+                .allowsHitTesting(opacity(v) > 0)
                 .accessibilityHint("Plays the song from this line")
                     .fixedSize(horizontal: false, vertical: true)
                     .background(GeometryReader { Color.clear.preference(key: HeightKey.self, value: [line.id: $0.size.height]) })
                     .scaleEffect(d == 0 || !animate ? 1 : 0.97, anchor: .leading)
                     .animation(animate ? Self.scaleSpring.delay(stagger(d)) : nil, value: model.currentIndex)
-                    .blur(radius: animate ? blur(d) * s : 0)
-                    .opacity(opacity(d))
+                    .blur(radius: animate && !browsing ? blur(d) * s : 0)
+                    .opacity(browsing ? (opacity(v) > 0 ? (d == 0 ? 1 : 0.75) : 0) : opacity(d))
                     .animation(animate ? .easeInOut(duration: 0.45) : nil, value: model.currentIndex)
+                    .animation(animate ? .easeInOut(duration: 0.3) : nil, value: model.browseAnchor)
                     .offset(y: yOffset(line.id, anchor: anchor))
                     .animation(animate ? Self.moveSpring.delay(stagger(d)) : nil, value: model.currentIndex)
+                    .animation(animate ? Self.moveSpring : nil, value: model.browseAnchor)
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -733,6 +860,68 @@ struct InterludeDots: View {
 }
 
 /// Previous, play/pause and next in one row.
+/// Elapsed time, a slim bar, and time left, like the mini player in Apple Music.
+/// In the card the panel drives dragging (see OverlayPanel); full screen uses a SwiftUI drag.
+struct SongProgress: View {
+    @ObservedObject var model: NowPlaying
+    let scale: Double
+    let fontSize: Double
+    let labelWidth: Double
+    let spacing: Double
+    var barHeight: Double? = nil
+    var draggable = false
+    /// Sitting on no glass, so it gets a soft shadow to stay readable over any window.
+    var floating = false
+    /// Album Color look: the bar and numbers take this color instead of white.
+    var tint: Color? = nil
+
+    var body: some View {
+        let scrubbing = model.scrubFraction != nil
+        TimelineView(.animation(minimumInterval: 0.25, paused: !model.displayPlaying || scrubbing)) { context in
+            let duration = model.displayDuration
+            let played = min(1, max(0, model.scrubFraction ?? model.playbackPosition(at: context.date) / max(1, duration)))
+            HStack(spacing: spacing) {
+                Text(Self.format(played * duration))
+                    .frame(width: labelWidth, alignment: .leading)
+                GeometryReader { bar in
+                    let thick = (barHeight ?? 3 * scale) * (scrubbing ? 1.7 : 1)
+                    ZStack(alignment: .leading) {
+                        Capsule().fill((tint ?? .white).opacity(tint != nil ? 0.4 : floating ? 0.3 : 0.22))
+                        Capsule().fill((tint ?? .white).opacity(tint != nil ? 1 : scrubbing ? 0.95 : 0.8))
+                            .frame(width: max(thick, bar.size.width * played))
+                    }
+                    .frame(height: thick)
+                    .frame(maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 0)
+                        .onChanged { model.scrubFraction = min(1, max(0, $0.location.x / max(1, bar.size.width))) }
+                        .onEnded { _ in
+                            if let target = model.scrubFraction { model.seek(toFraction: target) }
+                            model.scrubFraction = nil
+                        }, including: draggable ? .all : .none)
+                }
+                Text("-" + Self.format(max(0, duration - played * duration)))
+                    .frame(width: labelWidth, alignment: .trailing)
+            }
+            .font(.system(size: fontSize * (draggable ? 1 : scale), weight: .medium).monospacedDigit())
+            .foregroundStyle(tint ?? .white.opacity(floating ? 0.9 : 0.6))
+            // A wide, faint glow keeps white readable over bright windows without looking like an outline.
+            .shadow(color: .black.opacity(floating && tint == nil ? 0.22 : 0), radius: 6 * scale)
+            .lineLimit(1)
+            .animation(.easeOut(duration: 0.15), value: scrubbing)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Song position")
+        .accessibilityValue(Self.format(model.playbackPosition(at: Date())))
+    }
+
+    static func format(_ seconds: Double) -> String {
+        let total = Int(max(0, seconds).rounded(.down))
+        return total >= 3600 ? String(format: "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60)
+            : String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
 struct PlaybackControls: View {
     @ObservedObject var model: NowPlaying
     let scale: Double
@@ -797,12 +986,19 @@ private struct PressFade: ButtonStyle {
 /// on the GPU and blends perceptually, so the colors stay clean where they meet.
 struct LiquidBackground: View {
     let colors: [RGB]
+    /// A new cover's colors flow in cell by cell from these, inside the same moving mesh,
+    /// instead of one background fading over another.
+    var from: [RGB] = []
+    var changedAt = Date.distantPast
     let animated: Bool
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 20, paused: !animated)) { context in
+        // Keeps drawing while a color change finishes, even when the song is paused.
+        let blending = Date().timeIntervalSince(changedAt) < NowPlaying.meshBlend
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animated && !blending)) { context in
             let t = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 100_000)
-            MeshGradient(width: 4, height: 4, points: points(t), colors: blended(t),
+            let blend = min(1, max(0, context.date.timeIntervalSince(changedAt) / NowPlaying.meshBlend))
+            MeshGradient(width: 4, height: 4, points: points(t), colors: blended(t, blend: blend),
                          smoothsColors: true, colorSpace: .perceptual)
         }
         .allowsHitTesting(false)
@@ -817,8 +1013,8 @@ struct LiquidBackground: View {
                 let seed = Double(row * 4 + column)
                 let edgeX = column == 0 || column == 3, edgeY = row == 0 || row == 3
                 // Edge points may only slide along their edge, or the corners would show through.
-                let dx = edgeX ? 0 : (edgeY ? 0.09 : 0.14) * sin(t / (7.3 + seed * 0.61) + seed * 1.7)
-                let dy = edgeY ? 0 : (edgeX ? 0.09 : 0.14) * cos(t / (8.9 + seed * 0.47) + seed * 2.3)
+                let dx = edgeX ? 0 : (edgeY ? 0.09 : 0.14) * sin(t / (3.4 + seed * 0.29) + seed * 1.7)
+                let dy = edgeY ? 0 : (edgeX ? 0.09 : 0.14) * cos(t / (4.1 + seed * 0.23) + seed * 2.3)
                 result.append(SIMD2(Float(baseX + dx), Float(baseY + dy)))
             }
         }
@@ -826,14 +1022,17 @@ struct LiquidBackground: View {
     }
 
     /// The colors also travel from cell to cell, one step every few seconds.
-    private func blended(_ t: Double) -> [Color] {
+    private func blended(_ t: Double, blend: Double) -> [Color] {
         guard colors.count == 16 else { return Array(repeating: .black, count: 16) }
-        let position = t / 5.5
+        // Ease out the change of cover, so most of it happens early and the end settles softly.
+        let change = 1 - pow(1 - blend, 3)
+        let target = from.count == 16 && change < 1 ? zip(from, colors).map { $0.mixed(with: $1, change) } : colors
+        let position = t / 3.2
         let step = Int(position.rounded(.down)) % 16
         let fraction = position - position.rounded(.down)
         let eased = fraction * fraction * (3 - 2 * fraction)
         return (0..<16).map { index in
-            let mixed = colors[(index + step) % 16].mixed(with: colors[(index + step + 1) % 16], eased)
+            let mixed = target[(index + step) % 16].mixed(with: target[(index + step + 1) % 16], eased)
             return Color(red: mixed.r, green: mixed.g, blue: mixed.b)
         }
     }

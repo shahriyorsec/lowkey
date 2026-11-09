@@ -259,6 +259,10 @@ private struct GeneralPane: View {
         }
         GlassSection(title: "Behavior", footer: "A video counts once it has played for about 12 seconds, so short clips in feeds don't hide the card. Press ⌃⌥⌘H to bring the card back during a video.") {
             ToggleRow(title: "Show playback controls", isOn: $settings.p.showControls)
+            PickerRow(title: "Time bar", options: TimeBarStyle.allCases, selection: $settings.p.timeBar) { $0.label }
+            if settings.p.timeBar == .betweenBlocks {
+                PickerRow(title: "Time bar look", options: TimeBarLook.allCases, selection: $settings.p.timeBarLook) { $0.label }
+            }
             ToggleRow(title: "Click a lyric line to jump to it", isOn: $settings.p.clickToSeek)
             ToggleRow(title: "Hide when paused", isOn: $settings.p.hideWhenPaused)
             ToggleRow(title: "Hide when no lyrics are found", isOn: $settings.p.hideWhenNoLyrics)

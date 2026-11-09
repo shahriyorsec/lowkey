@@ -29,6 +29,31 @@ enum CardLayout: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+enum TimeBarStyle: String, Codable, CaseIterable, Identifiable {
+    case underTitle, betweenBlocks, off
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .underTitle: return "Under Title"
+        case .betweenBlocks: return "Between Blocks"
+        case .off: return "Off"
+        }
+    }
+}
+
+/// How the time bar between the blocks stays readable over light and dark windows.
+enum TimeBarLook: String, Codable, CaseIterable, Identifiable {
+    case glassPill, albumColor, plain
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .glassPill: return "Glass Pill"
+        case .albumColor: return "Album Color"
+        case .plain: return "Plain White"
+        }
+    }
+}
+
 enum EdgeStyle: String, Codable, CaseIterable, Identifiable {
     case lightEdge, borderless, hairline
     var id: String { rawValue }
@@ -89,6 +114,8 @@ struct Prefs: Codable, Equatable {
     var hideWhenPaused = true
     var hideWhenNoLyrics = false
     var hideDuringVideo = true
+    var timeBar = TimeBarStyle.underTitle
+    var timeBarLook = TimeBarLook.glassPill
 }
 
 final class Settings: ObservableObject {
