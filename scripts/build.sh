@@ -21,7 +21,8 @@ if [[ "${1:-}" == "--run" ]]; then open "$APP"; fi
 if [[ "${1:-}" == "--install" ]]; then
   pkill -x Lowkey 2>/dev/null || true
   rm -rf /Applications/Lowkey.app
-  cp -R "$APP" /Applications/Lowkey.app
+  # Move, not copy, so Spotlight only ever finds the one in /Applications.
+  mv "$APP" /Applications/Lowkey.app
   echo "Installed /Applications/Lowkey.app"
   open /Applications/Lowkey.app
 fi

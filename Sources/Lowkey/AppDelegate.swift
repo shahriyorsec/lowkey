@@ -44,14 +44,24 @@ struct ResizeEdges: OptionSet {
 }
 
 final class OverlayPanel: NSPanel {
+    static let everyDesktop: NSWindow.CollectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary,
+                                                            .ignoresCycle, .auxiliary, .canJoinAllApplications]
+
+    /// macOS sometimes drops the "every desktop" flag and pins the card to one desktop
+    /// (seen with Stage Manager on). Setting the behavior again puts it back on all of them.
+    func rejoinEveryDesktop() {
+        collectionBehavior = []
+        collectionBehavior = Self.everyDesktop
+        orderFrontRegardless()
+    }
+
     init() {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isFloatingPanel = true
         level = .statusBar
         // Stays on every desktop and above full-screen apps. Auxiliary keeps it out of Stage Manager,
         // which would otherwise gather it into Lowkey's own stage and hide it whenever another app is in front.
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle,
-                              .auxiliary, .canJoinAllApplications]
+        collectionBehavior = Self.everyDesktop
         isOpaque = false
         backgroundColor = .clear
         hasShadow = true
@@ -161,6 +171,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var bag = Set<AnyCancellable>()
 
     private var userHidden = false
+    private var spaceTimer: Timer?
+    /// Set when the user brings the card back during a video; lasts until that video stops.
+    private var videoDismissed = false
+    private var hiddenByVideo: Bool {
+        settings.p.hideDuringVideo && video.isPlaying && !videoDismissed && fullScreenSize == nil && !isEditing
+    }
     private var isEditing = false
     private var editingBinding: Binding<Bool>!
     private var isVisible = false
@@ -184,12 +200,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         editingBinding = Binding(get: { [unowned self] in isEditing }, set: { [unowned self] in setEditing($0) })
         buildStatusItem()
         rebuildContent()
+        DistributedNotificationCenter.default().addObserver(
+            forName: showSettingsNote, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.setUserHidden(false)
+                self?.openSettings()
+            }
+        }
         panel.onMoved = { [weak self] in self?.saveCustomOrigin() }
         panel.onEscape = { [weak self] in self?.setFullScreen(false) }
         panel.onResizeBegan = { [weak self] in self?.beginResize($0) }
         panel.onResizing = { [weak self] in self?.handleResize($0) }
         panel.onResizeEnded = { [weak self] in self?.resizeStart = nil }
         pointerTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in self?.updateMouseHandling() }
+        fitToScreen()
         updateFrame()
 
         settings.$p.receive(on: RunLoop.main).sink { [weak self] _ in self?.updateFrame() }.store(in: &bag)
@@ -197,11 +221,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settings.$p.receive(on: RunLoop.main).sink { [weak self] _ in self?.updateVisibility() }.store(in: &bag)
 
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
-                                               object: nil, queue: .main) { [weak self] _ in self?.updateFrame() }
+                                               object: nil, queue: .main) { [weak self] _ in
+            self?.fitToScreen()
+            self?.updateFrame()
+        }
         model.start()
         video.start()
-        video.$isPlaying.removeDuplicates().receive(on: RunLoop.main).sink { [weak self] _ in self?.updateVisibility() }.store(in: &bag)
+        video.$isPlaying.removeDuplicates().receive(on: RunLoop.main).sink { [weak self] playing in
+            if !playing { self?.videoDismissed = false }
+            self?.updateVisibility()
+        }.store(in: &bag)
         registerSettingsShortcut()
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            // The window server updates which desktop is showing a moment after the switch.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self?.keepOnThisDesktop() }
+        }
+        spaceTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.keepOnThisDesktop() }
         updateVisibility()
         AppIcon.apply(settings.p.appIcon)
         LoginItem.apply(settings.p.openAtLogin)
@@ -262,7 +298,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .custom:
             let wanted = NSRect(x: p.customX, y: p.customY - size.height, width: size.width, height: size.height)
             // A saved spot on an unplugged monitor falls back to the primary display.
-            if NSScreen.screens.contains(where: { $0.visibleFrame.intersects(wanted) }) { return wanted.origin }
+            if let area = NSScreen.screens.first(where: { $0.visibleFrame.intersects(wanted) })?.visibleFrame {
+                return NSPoint(x: min(max(area.minX, wanted.minX), area.maxX - size.width),
+                               y: min(max(area.minY, wanted.minY), area.maxY - size.height))
+            }
             return NSPoint(x: primary.maxX - size.width - margin, y: primary.minY + margin)
         }
     }
@@ -278,12 +317,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Pausing from the card's own button mustn't hide the button needed to resume.
             let holdForPointer = self.isVisible && self.model.isHovering && hasTrack
             // Out of the way while a video plays, so it never covers YouTube or a movie.
-            if p.hideDuringVideo && self.video.isPlaying && self.fullScreenSize == nil && !self.isEditing {
+            if self.hiddenByVideo {
                 self.setVisible(false)
                 return
             }
             self.setVisible(self.fullScreenSize != nil || self.isEditing || (!self.userHidden && hasTrack && (playingOK || holdForPointer) && lyricsOK))
         }
+    }
+
+    private func keepOnThisDesktop() {
+        guard isVisible, panel.isVisible, !panel.isOnActiveSpace else { return }
+        NSLog("Lowkey: card was missing from this desktop, putting it back on every desktop")
+        panel.rejoinEveryDesktop()
     }
 
     private func setVisible(_ visible: Bool) {
@@ -385,6 +430,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settings.p.anchor = .custom
     }
 
+    /// Space kept free around the card at its biggest, so its edges never sit on the
+    /// screen's edges (where the Dock, menu bar and hot corners take the pointer).
+    private static let screenMargin = 48.0
+
+    private func maxCardSize() -> NSSize {
+        let area = (panel.screen ?? NSScreen.screens.first)?.visibleFrame.size ?? NSSize(width: 1440, height: 900)
+        return NSSize(width: area.width - Self.screenMargin * 2, height: area.height - Self.screenMargin * 2)
+    }
+
+    /// The biggest content size whose smallest card still fits the screen.
+    private func maxScale(_ area: NSSize) -> Double {
+        min(3, area.width / CardGeometry.minWidth, area.height / CardGeometry.minHeight)
+    }
+
+    /// Pulls back a card that was saved too big (or a smaller display), so it can always be grabbed.
+    private func fitToScreen() {
+        guard fullScreenSize == nil else { return }
+        let area = maxCardSize()
+        var p = settings.p
+        p.scale = min(p.scale, maxScale(area))
+        if p.cardWidth > area.width { p.cardWidth = area.width }
+        if p.cardHeight > area.height { p.cardHeight = area.height }
+        var size = CardGeometry(p).size
+        // An automatic size can still overflow at a big content size; shrink the content until it fits.
+        while (size.width > area.width || size.height > area.height) && p.scale > 0.7 {
+            p.scale = max(0.7, p.scale - 0.05)
+            size = CardGeometry(p).size
+        }
+        guard p != settings.p else { return }
+        // Pulled back from too big: center it, so there is room to grab every side.
+        if let visible = (panel.screen ?? NSScreen.screens.first)?.visibleFrame {
+            p.anchor = .custom
+            p.customX = visible.midX - size.width / 2
+            p.customY = visible.midY + size.height / 2
+        }
+        settings.p = p
+    }
+
+    @objc func resetSize() {
+        if fullScreenSize != nil { setFullScreen(false) }
+        var p = settings.p
+        p.scale = 1
+        p.cardWidth = 0
+        p.cardHeight = 0
+        p.anchor = .bottomRight
+        settings.p = p
+    }
+
     private func beginResize(_ edges: ResizeEdges) {
         resizeStart = (edges, NSEvent.mouseLocation, panel.frame, settings.p.scale)
     }
@@ -393,12 +486,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func handleResize(_ mouse: NSPoint) {
         guard let start = resizeStart else { return }
         let dx = mouse.x - start.mouse.x, dy = mouse.y - start.mouse.y
-        let area = (panel.screen ?? NSScreen.screens.first)?.visibleFrame.size ?? NSSize(width: 4000, height: 4000)
+        let area = maxCardSize()
         var width = start.frame.width + (start.edges.contains(.right) ? dx : start.edges.contains(.left) ? -dx : 0)
         var height = start.frame.height + (start.edges.contains(.bottom) ? -dy : start.edges.contains(.top) ? dy : 0)
 
         let growth = ((width / start.frame.width) * (height / start.frame.height)).squareRoot()
-        let scale = min(3, max(0.7, start.scale * max(0.01, growth)))
+        let scale = min(maxScale(area), max(0.7, start.scale * max(0.01, growth)))
         width = min(area.width, max(CardGeometry.minWidth * scale, width))
         height = min(area.height, max(CardGeometry.minHeight * scale, height))
 
@@ -436,6 +529,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.target = self
             menu.addItem(item)
         }
+        let resetItem = NSMenuItem(title: "Reset Size", action: #selector(resetSize), keyEquivalent: "")
+        resetItem.target = self
+        menu.addItem(resetItem)
         let settingsItem = NSMenuItem(title: "Settings…   ⌃⌥⌘L", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
@@ -455,6 +551,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func setUserHidden(_ hidden: Bool) {
         userHidden = hidden
+        // Showing it on purpose wins over the video it was hiding for.
+        if !hidden && video.isPlaying { videoDismissed = true }
         updateVisibility()
     }
 
@@ -480,11 +578,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                             GetApplicationEventTarget(), 0, &hideHotKey)
     }
 
-    var isUserHidden: Bool { userHidden }
+    var isUserHidden: Bool { userHidden || hiddenByVideo }
 
     func menuWillOpen(_ menu: NSMenu) {
         if model.permissionDenied {
             statusLine.title = "Allow Spotify access in System Settings → Automation"
+        } else if hiddenByVideo {
+            statusLine.title = "Hidden while \(video.appName) plays a video"
         } else if let track = model.track {
             statusLine.title = "\(track.title) — \(track.artist)"
         } else {
@@ -492,7 +592,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         playItem.title = model.isPlaying ? "Pause" : "Play"
         fullScreenItem.title = fullScreenSize == nil ? "Full Screen Lyrics" : "Exit Full Screen"
-        toggleItem.title = userHidden ? "Show Overlay   ⌃⌥⌘H" : "Hide Overlay   ⌃⌥⌘H"
+        toggleItem.title = isUserHidden ? "Show Overlay   ⌃⌥⌘H" : "Hide Overlay   ⌃⌥⌘H"
         editItem.title = isEditing ? "Finish Editing" : "Edit Position and Size"
     }
 
@@ -501,8 +601,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func nextTrack() { model.nextTrack() }
 
     @objc private func toggleVisible() {
-        userHidden.toggle()
-        updateVisibility()
+        setUserHidden(!isUserHidden)
     }
 
     @objc func openSettings() {

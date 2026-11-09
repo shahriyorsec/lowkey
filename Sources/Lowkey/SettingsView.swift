@@ -257,7 +257,7 @@ private struct GeneralPane: View {
         GlassSection(title: "Startup", footer: LoginItem.isInstalled ? nil : "Works once Lowkey is installed in Applications.") {
             ToggleRow(title: "Open at login", isOn: $settings.p.openAtLogin)
         }
-        GlassSection(title: "Behavior") {
+        GlassSection(title: "Behavior", footer: "A video counts once it has played for about 12 seconds, so short clips in feeds don't hide the card. Press ⌃⌥⌘H to bring the card back during a video.") {
             ToggleRow(title: "Show playback controls", isOn: $settings.p.showControls)
             ToggleRow(title: "Click a lyric line to jump to it", isOn: $settings.p.clickToSeek)
             ToggleRow(title: "Hide when paused", isOn: $settings.p.hideWhenPaused)
@@ -362,8 +362,15 @@ private struct PositionPane: View {
                     settings.p.cardWidth = 0
                     settings.p.cardHeight = 0
                 }
-                
                 .disabled(settings.p.cardWidth == 0 && settings.p.cardHeight == 0)
+            }
+            SettingRow(title: "Too big to grab?") {
+                Button("Reset Size") {
+                    settings.p.scale = 1
+                    settings.p.cardWidth = 0
+                    settings.p.cardHeight = 0
+                    settings.p.anchor = .bottomRight
+                }
             }
         }
         GlassSection(title: "Full Screen") {
